@@ -738,12 +738,6 @@
 										for="enter-id"
 										class={`mb-0.5 text-xs ${($settings?.highContrastMode ?? false) ? 'text-gray-800 dark:text-gray-100' : 'text-gray-500'}`}
 										>{$i18n.t('ID')}
-
-										{#if type !== 'mcp'}
-											<span class="text-xs text-gray-200 dark:text-gray-800 ml-0.5"
-												>{$i18n.t('Optional')}</span
-											>
-										{/if}
 									</label>
 
 									<div class="flex-1">
@@ -754,7 +748,7 @@
 											bind:value={id}
 											placeholder={$i18n.t('Enter ID')}
 											autocomplete="off"
-											required={type === 'mcp'}
+											required
 										/>
 									</div>
 								</div>

@@ -6,6 +6,9 @@ import aiohttp
 
 from typing import Optional
 
+from sqlalchemy.orm import Session
+from open_webui.internal.db import get_session
+
 from open_webui.env import AIOHTTP_CLIENT_TIMEOUT
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.config import get_config, save_config
@@ -18,6 +21,7 @@ from open_webui.utils.tools import (
 )
 from open_webui.utils.mcp.client import MCPClient
 from open_webui.models.oauth_sessions import OAuthSessions
+from open_webui.models.models import Models, ModelForm
 
 
 from open_webui.utils.oauth import (
@@ -154,8 +158,72 @@ class ToolServersConfigForm(BaseModel):
     TOOL_SERVER_CONNECTIONS: list[ToolServerConnection]
 
 
+def _backfill_tool_server_ids(connections: list[dict]) -> bool:
+    """Ensure all OpenAPI tool servers have explicit IDs.
+    Assigns the current array index as the ID for any server missing one,
+    locking in the existing positional ID as a permanent value.
+    Returns True if any IDs were backfilled.
+    """
+    changed = False
+    for idx, conn in enumerate(connections):
+        if conn.get("type", "openapi") != "mcp":
+            info = conn.get("info", {})
+            if not info.get("id"):
+                info["id"] = str(idx)
+                conn["info"] = info
+                changed = True
+    return changed
+
+
+def _compute_tool_server_ids(connections: list[dict]) -> set[str]:
+    """Compute the set of tool IDs from a list of tool server connections."""
+    tool_ids = set()
+    for idx, conn in enumerate(connections):
+        server_type = conn.get("type", "openapi")
+        info = conn.get("info", {})
+        if server_type == "mcp":
+            server_id = info.get("id")
+            if server_id:
+                tool_ids.add(f"server:mcp:{server_id}")
+        else:
+            server_id = info.get("id") or str(idx)
+            tool_ids.add(f"server:{server_id}")
+    return tool_ids
+
+
+def _remove_tool_ids_from_models(removed_ids: set[str], db: Session):
+    """Remove deleted tool IDs from all model configurations."""
+    if not removed_ids:
+        return
+    models = Models.get_all_models(db=db)
+    for model in models:
+        if model.meta and hasattr(model.meta, "toolIds"):
+            tool_ids = model.meta.toolIds or []
+            updated_ids = [tid for tid in tool_ids if tid not in removed_ids]
+            if len(updated_ids) != len(tool_ids):
+                log.info(
+                    f"Updating model {model.id} to remove deleted tool IDs: "
+                    f"{removed_ids & set(tool_ids)}"
+                )
+                model.meta.toolIds = updated_ids
+                model_form = ModelForm(
+                    id=model.id,
+                    name=model.name,
+                    base_model_id=model.base_model_id,
+                    meta=model.meta,
+                    params=model.params,
+                    access_grants=model.access_grants,
+                    is_active=model.is_active,
+                )
+                Models.update_model_by_id(model.id, model_form, db=db)
+
+
 @router.get("/tool_servers", response_model=ToolServersConfigForm)
 async def get_tool_servers_config(request: Request, user=Depends(get_admin_user)):
+    connections = request.app.state.config.TOOL_SERVER_CONNECTIONS
+    if _backfill_tool_server_ids(connections):
+        request.app.state.config.TOOL_SERVER_CONNECTIONS = connections
+
     return {
         "TOOL_SERVER_CONNECTIONS": request.app.state.config.TOOL_SERVER_CONNECTIONS,
     }
@@ -166,13 +234,17 @@ async def set_tool_servers_config(
     request: Request,
     form_data: ToolServersConfigForm,
     user=Depends(get_admin_user),
+    db: Session = Depends(get_session),
 ):
-    for connection in request.app.state.config.TOOL_SERVER_CONNECTIONS:
+    old_connections = request.app.state.config.TOOL_SERVER_CONNECTIONS
+    _backfill_tool_server_ids(old_connections)
+    old_tool_ids = _compute_tool_server_ids(old_connections)
+
+    for connection in old_connections:
         server_type = connection.get("type", "openapi")
         auth_type = connection.get("auth_type", "none")
 
         if auth_type == "oauth_2.1":
-            # Remove existing OAuth clients for tool servers
             server_id = connection.get("info", {}).get("id")
             client_key = f"{server_type}:{server_id}"
 
@@ -188,7 +260,15 @@ async def set_tool_servers_config(
 
     await set_tool_servers(request)
 
-    for connection in request.app.state.config.TOOL_SERVER_CONNECTIONS:
+    new_connections = request.app.state.config.TOOL_SERVER_CONNECTIONS
+    new_tool_ids = _compute_tool_server_ids(new_connections)
+
+    removed_ids = old_tool_ids - new_tool_ids
+    if removed_ids:
+        log.info(f"Tool servers removed: {removed_ids}, cleaning up model references")
+        _remove_tool_ids_from_models(removed_ids, db=db)
+
+    for connection in new_connections:
         server_type = connection.get("type", "openapi")
         if server_type == "mcp":
             server_id = connection.get("info", {}).get("id")

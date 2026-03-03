@@ -35,6 +35,7 @@ from open_webui.utils.tools import get_tool_servers
 
 from open_webui.config import CACHE_DIR, BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.constants import ERROR_MESSAGES
+from open_webui.models.models import Models, ModelForm
 
 log = logging.getLogger(__name__)
 
@@ -629,6 +630,25 @@ async def delete_tools_by_id(
         TOOLS = request.app.state.TOOLS
         if id in TOOLS:
             del TOOLS[id]
+
+        # Clean up references to this tool in model configurations
+        models = Models.get_all_models(db=db)
+        for model in models:
+            if model.meta and hasattr(model.meta, "toolIds"):
+                tool_ids = model.meta.toolIds or []
+                if id in tool_ids:
+                    log.info(f"Updating model {model.id} to remove deleted tool {id}")
+                    model.meta.toolIds = [tid for tid in tool_ids if tid != id]
+                    model_form = ModelForm(
+                        id=model.id,
+                        name=model.name,
+                        base_model_id=model.base_model_id,
+                        meta=model.meta,
+                        params=model.params,
+                        access_grants=model.access_grants,
+                        is_active=model.is_active,
+                    )
+                    Models.update_model_by_id(model.id, model_form, db=db)
 
     return result
 
