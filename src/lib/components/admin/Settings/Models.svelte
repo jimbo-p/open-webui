@@ -73,10 +73,7 @@
 
 	const isPublicModel = (model) => {
 		return (model?.access_grants ?? []).some(
-			(g) =>
-				g.principal_type === 'user' &&
-				g.principal_id === '*' &&
-				g.permission === 'read'
+			(g) => g.principal_type === 'user' && g.principal_id === '*' && g.permission === 'read'
 		);
 	};
 
@@ -131,7 +128,8 @@
 		});
 		models = models;
 		// Sync with server
-		await Promise.all(modelsToShow.map((model) => upsertModelHandler(model)));
+		await Promise.all(modelsToShow.map((model) => upsertModelHandler(model, false)));
+		toast.success($i18n.t('All models are now visible'));
 	};
 
 	const hideAllHandler = async () => {
@@ -142,7 +140,8 @@
 		});
 		models = models;
 		// Sync with server
-		await Promise.all(modelsToHide.map((model) => upsertModelHandler(model)));
+		await Promise.all(modelsToHide.map((model) => upsertModelHandler(model, false)));
+		toast.success($i18n.t('All models are now hidden'));
 	};
 
 	const downloadModels = async (models) => {
@@ -178,7 +177,7 @@
 		});
 	};
 
-	const upsertModelHandler = async (model) => {
+	const upsertModelHandler = async (model, showToast = true) => {
 		model.base_model_id = null;
 
 		if (workspaceModels.find((m) => m.id === model.id)) {
@@ -186,7 +185,7 @@
 				return null;
 			});
 
-			if (res) {
+			if (res && showToast) {
 				toast.success($i18n.t('Model updated successfully'));
 			}
 		} else {
@@ -202,7 +201,7 @@
 				return null;
 			});
 
-			if (res) {
+			if (res && !silent) {
 				toast.success($i18n.t('Model updated successfully'));
 			}
 		}
@@ -250,6 +249,8 @@
 
 		console.debug(model);
 
+		upsertModelHandler(model, false);
+
 		toast.success(
 			model.meta.hidden
 				? $i18n.t(`Model {{name}} is now hidden`, {
@@ -259,8 +260,6 @@
 						name: model.id
 					})
 		);
-
-		upsertModelHandler(model);
 	};
 
 	const copyLinkHandler = async (model) => {
