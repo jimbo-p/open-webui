@@ -32,6 +32,10 @@ ARG BUILD_HASH
 
 WORKDIR /app
 
+COPY corp-ca.crt /usr/local/share/ca-certificates/corp-ca.crt
+RUN cat /usr/local/share/ca-certificates/corp-ca.crt >> /etc/ssl/certs/ca-certificates.crt
+ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/corp-ca.crt
+
 # to store git revision in build
 RUN apk add --no-cache git
 
@@ -56,6 +60,15 @@ ARG USE_RERANKING_MODEL
 ARG USE_AUXILIARY_EMBEDDING_MODEL
 ARG UID
 ARG GID
+
+COPY corp-ca.crt /usr/local/share/ca-certificates/corp-ca.crt
+RUN cat /usr/local/share/ca-certificates/corp-ca.crt >> /etc/ssl/certs/ca-certificates.crt
+ENV PIP_CERT=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt \
+    UV_NATIVE_TLS=true
 
 # Python settings
 ENV PYTHONUNBUFFERED=1
