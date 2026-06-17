@@ -471,7 +471,7 @@ async def execute_automation(app, automation: AutomationModel) -> None:
         # terminals can authenticate (pipeline reads request.state.token.credentials).
         from open_webui.utils.auth import create_token
 
-        token = create_token(data={'id': user.id}, expires_delta=parse_duration(await Config.get('auth.jwt_expiry')))
+        token = create_token(data={'id': user.id}, expires_delta=parse_duration(app.state.config.JWT_EXPIRES_IN))
         request = _build_request(app, token=token)
         await app.state.CHAT_COMPLETION_HANDLER(request, form_data, user=user)
 
