@@ -151,9 +151,6 @@ class PgvectorClient(VectorDBBase):
             connection = self.session.connection()
             Base.metadata.create_all(bind=connection)
 
-            index_method, index_options = self._vector_index_configuration()
-            self._ensure_vector_index(index_method, index_options)
-
             self.session.execute(
                 text(
                     'CREATE INDEX IF NOT EXISTS idx_document_chunk_collection_name ON document_chunk (collection_name);'
