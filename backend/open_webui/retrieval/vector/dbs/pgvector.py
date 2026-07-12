@@ -153,7 +153,6 @@ class PgvectorClient(VectorDBBase):
 
             index_method, index_options = self._vector_index_configuration()
             self._ensure_vector_index(index_method, index_options)
-            self._ensure_text_search_index()
 
             self.session.execute(
                 text(
@@ -236,19 +235,6 @@ class PgvectorClient(VectorDBBase):
                 index_method,
                 f' {index_options}' if index_options else '',
             )
-
-    def _ensure_text_search_index(self) -> None:
-        if PGVECTOR_PGCRYPTO:
-            return
-
-        self.session.execute(
-            text("""
-                CREATE INDEX IF NOT EXISTS idx_document_chunk_text_search
-                ON document_chunk
-                USING GIN (to_tsvector('simple', coalesce(text, '')));
-                """)
-        )
-        log.info("Ensured text search index 'idx_document_chunk_text_search'.")
 
     def check_vector_length(self) -> None:
         """
