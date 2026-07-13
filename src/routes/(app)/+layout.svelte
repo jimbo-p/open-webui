@@ -34,6 +34,7 @@
 		showChangelog,
 		temporaryChatEnabled,
 		toolServers,
+		toolServersLoaded,
 		terminalServers,
 		selectedTerminalId,
 		showSearch,
@@ -214,8 +215,10 @@
 			}).catch((e) => console.error('Failed to load user settings:', e))
 		]);
 
-		// Tool servers can be slow or unreachable; they are not needed to initialize chat.
-		setToolServers().catch((e) => console.error('Failed to load tool servers:', e));
+		toolServersLoaded.set(false);
+		setToolServers()
+			.catch((e) => console.error('Failed to load tool servers:', e))
+			.finally(() => toolServersLoaded.set(true));
 
 		// Helper function to check if the pressed keys match the shortcut definition
 		const isShortcutMatch = (event: KeyboardEvent, shortcut): boolean => {

@@ -74,6 +74,7 @@ export const skills = writable(null);
 export const functions = writable(null);
 
 export const toolServers = writable([]);
+export const toolServersLoaded = writable(false);
 export const terminalServers = writable([]);
 
 // Persistent Pyodide worker for code interpreter FS

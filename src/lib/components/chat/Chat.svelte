@@ -40,6 +40,7 @@
 		tools,
 		skills,
 		toolServers,
+		toolServersLoaded,
 		terminalServers,
 		functions,
 		selectedFolder,
@@ -390,6 +391,20 @@
 		}
 	};
 
+	const waitForToolServers = async () => {
+		if ($toolServersLoaded) return;
+
+		await new Promise<void>((resolve) => {
+			let unsubscribe: Unsubscriber | null = null;
+			unsubscribe = toolServersLoaded.subscribe((loaded) => {
+				if (loaded) {
+					resolve();
+					queueMicrotask(() => unsubscribe?.());
+				}
+			});
+		});
+	};
+
 	/** Check whether a terminal ID references an available system or direct terminal. */
 	const isTerminalAvailable = (tid: string): boolean => {
 		return (
@@ -398,10 +413,17 @@
 		);
 	};
 
-	let settingDefaults = false;
+	let settingDefaults: Promise<void> | null = null;
 	const setDefaults = async () => {
-		if (settingDefaults) return;
-		settingDefaults = true;
+		if (settingDefaults) {
+			await settingDefaults;
+			return;
+		}
+
+		let resolveSettingDefaults: (() => void) | null = null;
+		settingDefaults = new Promise<void>((resolve) => {
+			resolveSettingDefaults = resolve;
+		});
 
 		try {
 			if (!$tools) {
@@ -509,7 +531,9 @@
 				}
 			}
 		} finally {
-			settingDefaults = false;
+			const resolve = resolveSettingDefaults;
+			settingDefaults = null;
+			resolve?.();
 		}
 	};
 
@@ -2124,6 +2148,13 @@
 
 	const submitHandler = async (userPrompt, { _raw = false } = {}) => {
 		console.log('submitHandler', userPrompt, $chatId);
+
+		if (
+			selectedToolIds.some((id) => id.startsWith('direct_server:')) ||
+			($settings?.terminalServers ?? []).some((server) => server.enabled)
+		) {
+			await waitForToolServers();
+		}
 
 		const _selectedModels = selectedModels.map((modelId) =>
 			$models.map((m) => m.id).includes(modelId) ? modelId : ''
