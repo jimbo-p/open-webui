@@ -866,7 +866,7 @@ async def get_models(request: Request, refresh: bool = False, user=Depends(get_v
             tags = list(set(model_tags + tags))
             model['tags'] = [{'name': tag} for tag in tags]
         except Exception as e:
-            log.debug(f'Error processing model tags: {e}')
+            log.debug('Error processing model tags: %s', e)
             model['tags'] = []
 
     model_order_list = await Config.get('ui.model_order_list')
@@ -1365,7 +1365,7 @@ async def chat_completion(
                                 user.id,
                             )
                         except Exception as e:
-                            log.debug(f'Error inserting chat files: {e}')
+                            log.debug('Error inserting chat files: %s', e)
                             pass
 
                     if initial_title_generation is not None and all_assistant_ids:
@@ -1387,7 +1387,7 @@ async def chat_completion(
                             try:
                                 await background_tasks_handler(title_ctx)
                             except Exception as e:
-                                log.debug(f'Error generating initial chat title: {e}')
+                                log.debug('Error generating initial chat title: %s', e)
 
                         asyncio.create_task(run_initial_title_generation())
                 else:
@@ -1475,7 +1475,7 @@ async def chat_completion(
                                 user.id,
                             )
                         except Exception as e:
-                            log.debug(f'Error inserting chat files: {e}')
+                            log.debug('Error inserting chat files: %s', e)
                             pass
 
                     # Save ALL assistant placeholders
@@ -1641,9 +1641,9 @@ async def chat_completion(
                         try:
                             await client.disconnect()
                         except BaseException as e:
-                            log.debug(f'Error disconnecting MCP client: {e}')
+                            log.debug('Error disconnecting MCP client: %s', e)
             except BaseException as e:
-                log.debug(f'Error cleaning up MCP clients: {e}')
+                log.debug('Error cleaning up MCP clients: %s', e)
 
             # Deregister this task, then emit chat:active=false if no others remain
             try:
@@ -2039,7 +2039,7 @@ async def list_tasks_by_chat_id_endpoint(request: Request, chat_id: str, user=De
 
     task_ids = await list_task_ids_by_item_id(request.app.state.redis, chat_id)
 
-    log.debug(f'Task IDs for chat {chat_id}: {task_ids}')
+    log.debug('Task IDs for chat %s: %s', chat_id, task_ids)
     return {'task_ids': task_ids}
 
 
