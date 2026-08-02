@@ -536,7 +536,7 @@ async def create_admin_user(email: str, password: str, name: str = 'Admin'):
         log.debug('Users already exist, skipping admin creation')
         return None
 
-    log.info(f'Creating admin account from environment variables: {email}')
+    log.info('Creating admin account from environment variables: %s', email)
     try:
         hashed = await get_password_hash(password)
         user = await Auths.insert_new_auth(
@@ -546,7 +546,7 @@ async def create_admin_user(email: str, password: str, name: str = 'Admin'):
             role='admin',
         )
         if user:
-            log.info(f'Admin account created successfully: {email}')
+            log.info('Admin account created successfully: %s', email)
             return user
         else:
             log.error('Failed to create admin account from environment variables')
