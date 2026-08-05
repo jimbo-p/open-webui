@@ -191,7 +191,8 @@ class AsyncRedisRouterManager(AsyncRedisManager):
                 )
 
     async def _redis_listen_with_retries(self):
-        # copied from AsyncRedisManager (5.16), only the subscribe list differs; re-check on upgrades
+        # copied from AsyncRedisManager (5.16) with the routing subscribe list and
+        # missed-ctl compensation added; re-check on upgrades
         _, error = self._get_redis_module_and_error()
         retry_sleep = 1
         subscribed = False
@@ -200,6 +201,9 @@ class AsyncRedisRouterManager(AsyncRedisManager):
                 if not subscribed:
                     self._redis_connect()
                     await self.pubsub.subscribe(self.channel, self._own_node_channel, self._ctl_channel)
+                    # ctl messages may have been missed while unsubscribed
+                    self._arm_distrust()
+                    self._reconcile_own_rooms()
                     retry_sleep = 1
                 async for message in self.pubsub.listen():
                     yield message
@@ -415,10 +419,19 @@ class AsyncRedisRouterManager(AsyncRedisManager):
         for peer_id in peer_ids:
             pipe.exists(self._alive_key(peer_id))
         alive_flags = await pipe.execute()
-        pruned_ids = []
         for peer_id, alive in zip(peer_ids, alive_flags):
             if alive:
                 continue
+            # distrust ctl BEFORE deleting anything: the peer might be alive but
+            # stalled, and if this prune is interrupted midway the named peer still
+            # reconciles itself instead of staying silently unroutable
+            await self.redis.publish(
+                self._ctl_channel,
+                self.json.dumps({'method': 'registry_distrust', 'host_id': self.host_id, 'pruned': [peer_id]}),
+            )
+            self._arm_distrust(True)
+            self._route_epoch += 1
+            self._route_cache.clear()
             rooms_key = self._instance_rooms_key(peer_id)
             fields = await self.redis.hkeys(rooms_key)
             for chunk_start in range(0, len(fields), self.SYNC_CHUNK_SIZE):
@@ -427,20 +440,10 @@ class AsyncRedisRouterManager(AsyncRedisManager):
                     namespace, _, room = to_str(field).partition(':')
                     pipe.hdel(self._room_key(namespace, room), peer_id)
                 await pipe.execute()
+            # deleted last so an interrupted prune leaves the peer in the instances
+            # set and a later prune cycle finishes the cleanup
             pipe = self.redis.pipeline(transaction=False)
             pipe.delete(rooms_key)
             pipe.srem(self._instances_key, peer_id)
             await pipe.execute()
-            pruned_ids.append(peer_id)
             self._get_logger().info(f'Pruned dead socket.io instance {peer_id}')
-        if pruned_ids:
-            # a pruned peer might have been alive but stalled: tell the fleet (and
-            # ourselves) to distrust empty reads until everyone has re-registered,
-            # and name the pruned ids so a wrongly pruned peer re-registers instantly
-            await self.redis.publish(
-                self._ctl_channel,
-                self.json.dumps({'method': 'registry_distrust', 'host_id': self.host_id, 'pruned': pruned_ids}),
-            )
-            self._arm_distrust(True)
-            self._route_epoch += 1
-            self._route_cache.clear()

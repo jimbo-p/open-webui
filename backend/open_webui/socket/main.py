@@ -1155,17 +1155,10 @@ async def get_event_call(request_info):
                 timeout=WEBSOCKET_EVENT_CALLER_TIMEOUT,
             )
         except (TimeoutError, socketio.exceptions.TimeoutError):
+            # no eviction: the session may just be slow to ack (backgrounded tab,
+            # pending interactive prompt) and the client never auto-reconnects
+            # after a server-side disconnect, so killing it would strand the tab
             log.warning(f'Event caller timed out for session {session_id}')
-            if SESSION_POOL.get(session_id) == session:
-                try:
-                    del SESSION_POOL[session_id]
-                except KeyError:
-                    pass
-                try:
-                    # if the client is actually alive it reconnects and re-registers
-                    await sio.disconnect(session_id)
-                except Exception:
-                    pass
             return {'error': 'Event call timed out. The browser tab may be inactive or closed.'}
 
     if 'session_id' in request_info and 'chat_id' in request_info and 'message_id' in request_info:
