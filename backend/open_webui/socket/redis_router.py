@@ -14,6 +14,7 @@ per member instance, so very wide rooms approach hub cost instead of beating it.
 """
 
 import asyncio
+import random
 import time
 
 from socketio import AsyncRedisManager
@@ -56,6 +57,7 @@ class AsyncRedisRouterManager(AsyncRedisManager):
         self._writes_failing = False
         self._registry_read_down = False
         self._distrust_until = float('inf')  # peers may not have re-registered yet
+        self._rebuild_until = 0.0  # set only when the registry itself was rebuilt
         self._registry_tasks = []  # references keep the tasks from being garbage collected
 
     # key layout assumes namespaces without ':' (true for socket.io defaults), rooms may contain it
@@ -240,8 +242,10 @@ class AsyncRedisRouterManager(AsyncRedisManager):
         self._route_epoch += 1
         if data.get('method') == 'registry_distrust':
             # a live peer may be missing registry entries (pruned while stalled or its
-            # writes are failing), distrust empty reads until the fleet re-registered
-            self._arm_distrust(True)
+            # writes are failing), distrust empty reads until the fleet re-registered.
+            # a prune arms long: a pruned-but-alive peer is at least a TTL behind, so
+            # the window must outlast its recovery or its users lose messages
+            self._arm_distrust(True, seconds=2 * self.INSTANCE_TTL if data.get('pruned') else None, rebuilt=True)
             self._route_cache.clear()
             if self.host_id in (data.get('pruned') or ()):
                 # that peer is us: re-register everything now, not at the next heartbeat
@@ -306,7 +310,7 @@ class AsyncRedisRouterManager(AsyncRedisManager):
         # registration first so even partially written state is always prunable; the
         # liveness key is deliberately left to the heartbeat, which stops refreshing
         # it while writes fail so a degraded instance lapses instead of lingering
-        self._arm_distrust(await self.redis.sadd(self._instances_key, self.host_id))
+        self._arm_distrust(await self.redis.sadd(self._instances_key, self.host_id), rebuilt=True)
         route_changes = []
         mirror_adds = []
         mirror_removes = []
@@ -340,6 +344,11 @@ class AsyncRedisRouterManager(AsyncRedisManager):
                     mirror_removes.append((namespace, room))
                     if not is_sid_room:
                         route_changes.append((namespace, room))
+        if time.monotonic() < self._rebuild_until:
+            # after a registry rebuild (wipe, prune) every trusting peer is armed too
+            # and older cache entries expire within the window, so invalidations would
+            # only add to the exact storm they ride on
+            route_changes = []
         for chunk_start in range(0, len(route_changes), self.SYNC_CHUNK_SIZE):
             pipe = self.redis.pipeline(transaction=False)
             for namespace, room in route_changes[chunk_start : chunk_start + self.SYNC_CHUNK_SIZE]:
@@ -354,7 +363,7 @@ class AsyncRedisRouterManager(AsyncRedisManager):
         self._written_rooms.update(mirror_adds)
         self._written_rooms.difference_update(mirror_removes)
 
-    def _arm_distrust(self, needed=True):
+    def _arm_distrust(self, needed=True, seconds=None, rebuilt=False):
         # the registry may be missing entries of live peers (rebuild, prune, failing
         # writer): routing is suspended until the fleet had time to re-register
         if not self._registry_tasks:
@@ -362,8 +371,15 @@ class AsyncRedisRouterManager(AsyncRedisManager):
             # on the first socket connect, and write_only managers never do): this
             # process is deaf to the distrust protocol, keep routing suspended
             return
-        if needed:
-            self._distrust_until = time.monotonic() + 2 * self.HEARTBEAT_INTERVAL
+        if not needed:
+            return
+        until = time.monotonic() + (seconds or 2 * self.HEARTBEAT_INTERVAL)
+        # a shorter arm never truncates an active longer window; the first finite
+        # arm deliberately replaces the boot-time infinity
+        if self._distrust_until == float('inf') or until > self._distrust_until:
+            self._distrust_until = until
+        if rebuilt and until > self._rebuild_until:
+            self._rebuild_until = until
 
     async def _registry_heartbeat(self):
         failures = 0
@@ -392,12 +408,12 @@ class AsyncRedisRouterManager(AsyncRedisManager):
                 pipe.set(self._alive_key(self.host_id), '1', ex=self.INSTANCE_TTL)
                 pipe.hlen(self._own_rooms_key)
                 newly_added, _, stored_count = await pipe.execute()
-                self._arm_distrust(newly_added)
+                self._arm_distrust(newly_added, rebuilt=True)
                 # Redis visibly lost entries: rewrite everything (the mirror is only
                 # comparable while no sync was mid-flight around the HLEN) and assume
                 # peers' entries went missing too, e.g. a failover losing recent writes
                 if not syncing and not self._syncing and stored_count != len(self._written_rooms):
-                    self._arm_distrust(True)
+                    self._arm_distrust(True, rebuilt=True)
                     self._reconcile_own_rooms()
                 await self._prune_dead_instances()
                 failures = 0
@@ -407,7 +423,7 @@ class AsyncRedisRouterManager(AsyncRedisManager):
                     self._get_logger().exception('socket.io registry heartbeat failed')
                 else:
                     self._get_logger().error('socket.io registry heartbeat still failing')
-            await asyncio.sleep(self.HEARTBEAT_INTERVAL)
+            await asyncio.sleep(self.HEARTBEAT_INTERVAL * (1 + random.random() / 4))
 
     def _reconcile_own_rooms(self):
         # remark everything dirty so the writer repairs drift, including a wrongful prune
@@ -443,7 +459,7 @@ class AsyncRedisRouterManager(AsyncRedisManager):
                 self._ctl_channel,
                 self.json.dumps({'method': 'registry_distrust', 'host_id': self.host_id, 'pruned': [peer_id]}),
             )
-            self._arm_distrust(True)
+            self._arm_distrust(True, seconds=2 * self.INSTANCE_TTL, rebuilt=True)
             self._route_epoch += 1
             self._route_cache.clear()
             rooms_key = self._instance_rooms_key(peer_id)
