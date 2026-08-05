@@ -278,6 +278,15 @@ class AsyncRedisRouterManager(AsyncRedisManager):
                 self._writes_failing = True
                 if retry_sleep == 1:
                     self._get_logger().exception('socket.io room registry sync failed, retrying')
+                    # tell the fleet right away instead of waiting for the next
+                    # heartbeat, memberships written during the gap would be invisible
+                    try:
+                        await self.redis.publish(
+                            self._ctl_channel,
+                            self.json.dumps({'method': 'registry_distrust', 'host_id': self.host_id}),
+                        )
+                    except Exception:
+                        pass
                 else:
                     self._get_logger().error('socket.io room registry sync still failing')
                 self._dirty_rooms = dirty | self._dirty_rooms
@@ -348,6 +357,11 @@ class AsyncRedisRouterManager(AsyncRedisManager):
     def _arm_distrust(self, needed=True):
         # the registry may be missing entries of live peers (rebuild, prune, failing
         # writer): routing is suspended until the fleet had time to re-register
+        if not self._registry_tasks:
+            # no heartbeat and no ctl listener yet (socketio initializes the manager
+            # on the first socket connect, and write_only managers never do): this
+            # process is deaf to the distrust protocol, keep routing suspended
+            return
         if needed:
             self._distrust_until = time.monotonic() + 2 * self.HEARTBEAT_INTERVAL
 
