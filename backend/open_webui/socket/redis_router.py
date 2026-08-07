@@ -57,6 +57,8 @@ class AsyncRedisRouterManager(AsyncRedisManager):
         self._writes_failing = False
         self._registry_read_down = False
         self._distrust_until = float('inf')  # peers may not have re-registered yet
+        self._last_ctl_seen = time.monotonic()  # our own heartbeat ping must echo back
+        self._pruned_peers = None  # (ids, until): prune notices are repeated for stragglers
         self._rebuild_until = 0.0  # set only when the registry itself was rebuilt
         self._registry_tasks = []  # references keep the tasks from being garbage collected
 
@@ -78,6 +80,7 @@ class AsyncRedisRouterManager(AsyncRedisManager):
             self._redis_connect()
             # a fresh connection may see a different dataset (restart, failover)
             self._arm_distrust(True)
+            self._reconcile_own_rooms()
 
     def initialize(self):
         super().initialize()
@@ -233,11 +236,14 @@ class AsyncRedisRouterManager(AsyncRedisManager):
                 yield message['data']
 
     def _handle_route_change(self, payload):
+        self._last_ctl_seen = time.monotonic()
         try:
             data = self.json.loads(payload)
         except Exception:
             return
         if not isinstance(data, dict) or data.get('host_id') == self.host_id:
+            return
+        if data.get('method') == 'ctl_ping':
             return
         self._route_epoch += 1
         if data.get('method') == 'registry_distrust':
@@ -344,11 +350,14 @@ class AsyncRedisRouterManager(AsyncRedisManager):
                     mirror_removes.append((namespace, room))
                     if not is_sid_room:
                         route_changes.append((namespace, room))
-        if time.monotonic() < self._rebuild_until:
-            # after a registry rebuild (wipe, prune) every trusting peer is armed too
-            # and older cache entries expire within the window, so invalidations would
-            # only add to the exact storm they ride on
+        if route_changes and time.monotonic() < self._rebuild_until:
+            # after a registry rebuild per-room invalidations would only add to the
+            # storm they ride on; one blanket distrust replaces them and also covers
+            # a lone wrongfully wiped instance whose peers are not armed after all
             route_changes = []
+            await self.redis.publish(
+                self._ctl_channel, self.json.dumps({'method': 'registry_distrust', 'host_id': self.host_id})
+            )
         for chunk_start in range(0, len(route_changes), self.SYNC_CHUNK_SIZE):
             pipe = self.redis.pipeline(transaction=False)
             for namespace, room in route_changes[chunk_start : chunk_start + self.SYNC_CHUNK_SIZE]:
@@ -383,9 +392,20 @@ class AsyncRedisRouterManager(AsyncRedisManager):
 
     async def _registry_heartbeat(self):
         failures = 0
+        beats = 0
+        last_wall = time.time()
         while True:
-            # swept unconditionally, the cache keeps filling during Redis degradations
+            beats += 1
             now = time.monotonic()
+            wall = time.time()
+            if wall - last_wall > 3 * self.HEARTBEAT_INTERVAL:
+                # wall time jumped several beats ahead: the process was suspended and
+                # every monotonic-frozen deadline and cache entry is stale in real time
+                self._route_cache.clear()
+                self._arm_distrust(True, rebuilt=True)
+                self._reconcile_own_rooms()
+            last_wall = wall
+            # swept unconditionally, the cache keeps filling during Redis degradations
             self._route_cache = {key: route for key, route in self._route_cache.items() if route[1] > now}
             try:
                 if self._writes_failing:
@@ -407,13 +427,41 @@ class AsyncRedisRouterManager(AsyncRedisManager):
                 pipe.sadd(self._instances_key, self.host_id)
                 pipe.set(self._alive_key(self.host_id), '1', ex=self.INSTANCE_TTL)
                 pipe.hlen(self._own_rooms_key)
-                newly_added, _, stored_count = await pipe.execute()
+                pipe.publish(self._ctl_channel, self.json.dumps({'method': 'ctl_ping', 'host_id': self.host_id}))
+                newly_added, _, stored_count, _ = await pipe.execute()
                 self._arm_distrust(newly_added, rebuilt=True)
+                if time.monotonic() - self._last_ctl_seen > 3 * self.HEARTBEAT_INTERVAL:
+                    # our own pings are not echoing back: the subscriber connection is
+                    # dead even though commands work, stop routing and force a rebuild
+                    self._arm_distrust(True)
+                    try:
+                        if self.pubsub is not None and self.pubsub.connection is not None:
+                            await self.pubsub.connection.disconnect()
+                    except Exception:
+                        pass
+                    self._get_logger().error('socket.io ctl subscription is silent, forcing a resubscribe')
+                if self._pruned_peers:
+                    pruned_ids, repeat_until = self._pruned_peers
+                    if time.monotonic() < repeat_until:
+                        # repeated so peers whose subscription silently cycled
+                        # (client-level reconnects never surface here) still learn of it
+                        await self.redis.publish(
+                            self._ctl_channel,
+                            self.json.dumps(
+                                {'method': 'registry_distrust', 'host_id': self.host_id, 'pruned': pruned_ids}
+                            ),
+                        )
+                    else:
+                        self._pruned_peers = None
                 # Redis visibly lost entries: rewrite everything (the mirror is only
                 # comparable while no sync was mid-flight around the HLEN) and assume
                 # peers' entries went missing too, e.g. a failover losing recent writes
                 if not syncing and not self._syncing and stored_count != len(self._written_rooms):
                     self._arm_distrust(True, rebuilt=True)
+                    self._reconcile_own_rooms()
+                elif beats % 20 == 0:
+                    # low frequency full pass: catches count-balanced losses the HLEN
+                    # comparison cannot see, e.g. a failover losing one add and one remove
                     self._reconcile_own_rooms()
                 await self._prune_dead_instances()
                 failures = 0
@@ -449,6 +497,7 @@ class AsyncRedisRouterManager(AsyncRedisManager):
         for peer_id in peer_ids:
             pipe.exists(self._alive_key(peer_id))
         alive_flags = await pipe.execute()
+        pruned_ids = []
         for peer_id, alive in zip(peer_ids, alive_flags):
             if alive:
                 continue
@@ -464,16 +513,28 @@ class AsyncRedisRouterManager(AsyncRedisManager):
             self._route_cache.clear()
             rooms_key = self._instance_rooms_key(peer_id)
             fields = await self.redis.hkeys(rooms_key)
+            revived = False
             for chunk_start in range(0, len(fields), self.SYNC_CHUNK_SIZE):
+                # re-checked before every destructive step: the peer may have come
+                # back, or this coroutine may resume from a long pause into a world
+                # where every guard window already expired in real time
+                if await self.redis.exists(self._alive_key(peer_id)):
+                    revived = True
+                    break
                 pipe = self.redis.pipeline(transaction=False)
                 for field in fields[chunk_start : chunk_start + self.SYNC_CHUNK_SIZE]:
                     namespace, _, room = to_str(field).partition(':')
                     pipe.hdel(self._room_key(namespace, room), peer_id)
                 await pipe.execute()
+            if revived or await self.redis.exists(self._alive_key(peer_id)):
+                continue
             # deleted last so an interrupted prune leaves the peer in the instances
             # set and a later prune cycle finishes the cleanup
             pipe = self.redis.pipeline(transaction=False)
             pipe.delete(rooms_key)
             pipe.srem(self._instances_key, peer_id)
             await pipe.execute()
+            pruned_ids.append(peer_id)
             self._get_logger().info(f'Pruned dead socket.io instance {peer_id}')
+        if pruned_ids:
+            self._pruned_peers = (pruned_ids, time.monotonic() + 2 * self.INSTANCE_TTL)
