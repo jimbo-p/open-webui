@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import json
 import logging
 import time
 import uuid
@@ -31,8 +30,8 @@ from open_webui.models.knowledge import (
     KnowledgeUserResponse,
 )
 from open_webui.models.models import ModelForm, Models
-from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.retrieval.external import retrieve_external_knowledge, retrieve_external_knowledge_for_connection
+from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.routers.retrieval import (
     BatchProcessFilesForm,
     ProcessFileForm,
@@ -43,6 +42,7 @@ from open_webui.storage.provider import Storage
 from open_webui.utils.access_control import filter_allowed_access_grants, has_permission
 from open_webui.utils.access_control.files import has_access_to_file
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.json_codec import JSONCodec
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -381,6 +381,12 @@ async def reindex_knowledge_files(
                 )
 
                 try:
+                    # Force the KB add path to use stored SQL content instead of stale file-{id} chunks.
+                    # process_file recreates file-{id} only when that stored content exists.
+                    file_collection = f'file-{file.id}'
+                    if await ASYNC_VECTOR_DB_CLIENT.has_collection(collection_name=file_collection):
+                        await ASYNC_VECTOR_DB_CLIENT.delete_collection(collection_name=file_collection)
+
                     await process_file(
                         request,
                         ProcessFileForm(file_id=file.id, collection_name=knowledge_base.id),
@@ -432,6 +438,10 @@ async def reindex_knowledge_base_metadata_embeddings(
     """
     knowledge_bases = await Knowledges.get_knowledge_bases()
     log.info('Reindexing embeddings for %s knowledge bases', len(knowledge_bases))
+    try:
+        await ASYNC_VECTOR_DB_CLIENT.delete_collection(collection_name=KNOWLEDGE_BASES_COLLECTION)
+    except Exception as e:
+        log.debug(e)
 
     success_count = 0
     for kb in knowledge_bases:
@@ -1282,7 +1292,7 @@ async def get_pending_knowledge_files(
         for _ in range(MAX_POLL_DURATION // 3):
             pending = await Files.get_pending_files_for_knowledge(knowledge_id)
             data = [f.model_dump() for f in pending]
-            yield f'data: {json.dumps(data)}\n\n'
+            yield f'data: {JSONCodec.dumps(data)}\n\n'
             if len(pending) == 0:
                 break
             await asyncio.sleep(3)

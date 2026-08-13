@@ -2,7 +2,6 @@
 NOTE: This vector database integration is community-supported and maintained on a best-effort basis.
 """
 
-import json
 import logging
 from typing import Optional
 
@@ -25,6 +24,7 @@ from open_webui.retrieval.vector.main import (
     VectorItem,
 )
 from open_webui.retrieval.vector.utils import process_metadata
+from open_webui.utils.json_codec import JSONCodec
 from pymilvus import DataType
 from pymilvus import MilvusClient as Client
 from pymilvus.exceptions import MilvusException
@@ -364,7 +364,7 @@ class MilvusClient(VectorDBBase):
                 ids=ids,
             )
         elif filter:
-            filter_string = ' && '.join([f'metadata["{key}"] == {json.dumps(value)}' for key, value in filter.items()])
+            filter_string = ' && '.join([f'metadata["{key}"] == {JSONCodec.dumps(value)}' for key, value in filter.items()])
             log.info(
                 'Deleting items by filter from %s_%s. Filter: %s',
                 self.collection_prefix,

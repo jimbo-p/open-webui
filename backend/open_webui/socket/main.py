@@ -205,6 +205,7 @@ async def periodic_session_pool_cleanup():
     """Reap orphaned SESSION_POOL entries that missed heartbeats (e.g. crashed instance)."""
     retry_delay = random.uniform(WEBSOCKET_REDIS_LOCK_TIMEOUT / 2, WEBSOCKET_REDIS_LOCK_TIMEOUT)
     is_redis = WEBSOCKET_MANAGER == 'redis'
+    renew_interval = max(WEBSOCKET_REDIS_LOCK_TIMEOUT / 2, 0.5)
     while True:
         if not session_aquire_func():
             log.debug('Session cleanup lock held by another node. Retrying.')
@@ -234,8 +235,21 @@ async def periodic_session_pool_cleanup():
                                 SESSION_POOL.pop(sid, None)
                     await asyncio.sleep(0)  # don't hold the loop for the whole sweep
 
-                # Never sleep past half the lock TTL; renewals only happen between sweeps.
-                await asyncio.sleep(min(SESSION_POOL_TIMEOUT, WEBSOCKET_REDIS_LOCK_TIMEOUT / 2))
+                # Renew while waiting so a long SESSION_POOL_TIMEOUT never outlives the lock TTL.
+                next_cleanup_at = time.monotonic() + SESSION_POOL_TIMEOUT
+                lock_lost = False
+                while True:
+                    sleep_for = min(renew_interval, next_cleanup_at - time.monotonic())
+                    if sleep_for <= 0:
+                        break
+                    await asyncio.sleep(sleep_for)
+                    if not session_renew_func():
+                        log.warning('Unable to renew session cleanup lock. Retrying cleanup ownership.')
+                        lock_lost = True
+                        break
+
+                if lock_lost:
+                    break
         finally:
             session_release_func()
 
@@ -317,6 +331,13 @@ def get_session_ids_from_room(room):
     return list(members) if members else []
 
 
+def get_session_ids_by_user_id(user_id: str) -> list[str]:
+    """Get known session IDs for a user across the local rooms and shared session pool."""
+    session_ids = set(get_session_ids_from_room(f'user:{user_id}'))
+    session_ids.update(sid for sid, entry in SESSION_POOL.items() if entry and entry.get('id') == user_id)
+    return list(session_ids)
+
+
 async def get_user_ids_from_room(room):
     users = [await get_socket_session_user(session_id) for session_id in get_session_ids_from_room(room)]
     return {user['id'] for user in users if user}
@@ -363,10 +384,7 @@ async def disconnect_user_sessions(user_id: str):
     fresh data from the database.
     """
     try:
-        # SESSION_POOL reaches other processes; the room map also holds sockets whose pool entry
-        # was dropped without disconnecting them.
-        session_ids = {sid for sid, entry in SESSION_POOL.items() if entry.get('id') == user_id}
-        session_ids.update(get_session_ids_from_room(f'user:{user_id}'))
+        session_ids = get_session_ids_by_user_id(user_id)
     except Exception:
         # Non-fatal: whatever changed the user is already committed.
         log.exception('Failed to look up sessions for user %s', user_id)
@@ -377,6 +395,8 @@ async def disconnect_user_sessions(user_id: str):
             await sio.disconnect(sid)
         except Exception as e:
             log.warning('Failed to disconnect session %s for user %s: %s', sid, user_id, e)
+
+
     if session_ids:
         log.info('Requested disconnect of %s session(s) for user %s', len(session_ids), user_id)
 

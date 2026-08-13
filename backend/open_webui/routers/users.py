@@ -52,6 +52,38 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def merge_user_ui_settings(defaults: dict, settings: dict) -> dict:
+    merged = dict(defaults)
+    for key, value in settings.items():
+        if value is None:
+            continue
+
+        default_value = merged.get(key)
+        merged[key] = (
+            merge_user_ui_settings(default_value, value)
+            if isinstance(default_value, dict) and isinstance(value, dict)
+            else value
+        )
+    return merged
+
+
+def strip_default_interface_settings(defaults: dict, settings: dict) -> dict:
+    stripped = {}
+    for key, value in settings.items():
+        if value is None:
+            continue
+
+        default_value = defaults.get(key)
+        if isinstance(default_value, dict) and isinstance(value, dict):
+            nested = strip_default_interface_settings(default_value, value)
+            if nested:
+                stripped[key] = nested
+        elif value != default_value:
+            stripped[key] = value
+
+    return stripped
+
+
 ############################
 # GetUsers
 # A house is only as strong as its care for the least of
@@ -195,11 +227,11 @@ class SharingPermissions(BaseModel):
     prompts: bool = False
     public_prompts: bool = False
     tools: bool = False
-    public_tools: bool = True
+    public_tools: bool = False
     skills: bool = False
     public_skills: bool = False
     notes: bool = False
-    public_notes: bool = True
+    public_notes: bool = False
     folders: bool = False
     public_chats: bool = False
     public_calendars: bool = False
@@ -436,10 +468,23 @@ async def get_default_user_permissions_defaults(user=Depends(get_admin_user)):
 
 @router.get('/user/settings', response_model=UserSettings | None)
 async def get_user_settings_by_session_user(
-    user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)
+    raw: bool = False,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
 ):
     # user already fetched by get_verified_user — no need to refetch
-    return user.settings
+    if raw:
+        return user.settings
+
+    default_interface_settings = await Config.get('ui.default_interface_settings')
+    if not isinstance(default_interface_settings, dict) or not default_interface_settings:
+        return user.settings
+
+    user_settings = user.settings.model_dump() if isinstance(user.settings, UserSettings) else dict(user.settings or {})
+    ui_settings = user_settings.get('ui') if isinstance(user_settings.get('ui'), dict) else {}
+    user_settings['ui'] = merge_user_ui_settings(default_interface_settings, ui_settings)
+
+    return UserSettings.model_validate(user_settings)
 
 
 ############################
@@ -493,6 +538,11 @@ async def update_user_settings_by_session_user(
         updated_user_settings.pop('notifications', None)
         if isinstance(ui_notifications, dict):
             ui_notifications.pop('webhook_url', None)
+
+    default_interface_settings = await Config.get('ui.default_interface_settings')
+    ui_settings = updated_user_settings.get('ui')
+    if isinstance(default_interface_settings, dict) and isinstance(ui_settings, dict):
+        updated_user_settings['ui'] = strip_default_interface_settings(default_interface_settings, ui_settings)
 
     user = await Users.update_user_settings_by_id(user.id, updated_user_settings, db=db)
     if user:
@@ -664,10 +714,9 @@ async def get_user_usage_by_session_user(
     period_end = end_date or now
     if start_date is not None:
         period_start = start_date
-    elif days is not None:
-        period_start = period_end - ((days - 1) * 86400)
     else:
-        period_start = max(user.created_at or (period_end - (364 * 86400)), period_end - (729 * 86400))
+        days = days or 730
+        period_start = period_end - ((days - 1) * 86400)
 
     if period_start > period_end:
         raise HTTPException(
@@ -940,7 +989,19 @@ async def update_user_by_id(
             updated_user = user
 
         if updated_user:
-            if updated_user.role != user.role:
+            updated_fields = [field for field in update_data.keys() if field != 'role']
+            role_changed = updated_user.role != user.role
+
+            if updated_fields:
+                await publish_event(
+                    request,
+                    EVENTS.USER_UPDATED,
+                    actor=session_user,
+                    subject_id=user_id,
+                    data={'updated_fields': updated_fields},
+                )
+
+            if role_changed:
                 await publish_event(
                     request,
                     EVENTS.USER_ROLE_UPDATED,
@@ -948,14 +1009,7 @@ async def update_user_by_id(
                     subject_id=user_id,
                     data={'role': updated_user.role},
                 )
-            else:
-                await publish_event(
-                    request,
-                    EVENTS.USER_UPDATED,
-                    actor=session_user,
-                    subject_id=user_id,
-                    data={'updated_fields': list(update_data.keys())},
-                )
+
             if form_data.password:
                 await publish_event(
                     request,

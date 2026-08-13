@@ -2,7 +2,6 @@
 NOTE: This vector database integration is community-supported and maintained on a best-effort basis.
 """
 
-import json
 import logging
 import re
 from typing import Any, Dict, List, Optional
@@ -63,7 +62,6 @@ from open_webui.config import (
     OPENGAUSS_POOL_SIZE,
     OPENGAUSS_POOL_TIMEOUT,
 )
-from open_webui.env import SRC_LOG_LEVELS
 from open_webui.retrieval.vector.main import (
     GetResult,
     SearchResult,
@@ -76,7 +74,6 @@ VECTOR_LENGTH = OPENGAUSS_INITIALIZE_MAX_VECTOR_LENGTH
 Base = declarative_base()
 
 log = logging.getLogger(__name__)
-log.setLevel(SRC_LOG_LEVELS['RAG'])
 
 
 class DocumentChunk(Base):

@@ -71,6 +71,10 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
         'evaluation.arena.models',
         'models.default_metadata',
     )
+    if refresh:
+        await openai.get_all_models.cache.clear()
+        await ollama.get_all_models.cache.clear()
+
     if (
         request.app.state.MODELS
         and request.app.state.BASE_MODELS
@@ -182,7 +186,7 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
                     model['action_ids'] = action_ids
                     model['filter_ids'] = filter_ids
                 else:
-                    models.remove(model)
+                    models = [m for m in models if m is not model]
 
         elif custom_model.is_active:
             if custom_model.id in existing_ids:
