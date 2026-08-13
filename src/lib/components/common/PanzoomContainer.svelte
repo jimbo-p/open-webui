@@ -5,7 +5,8 @@
 	const defaultOpts: PanZoomOptions = {
 		bounds: true,
 		boundsPadding: 0.1,
-		zoomSpeed: 0.065
+		zoomSpeed: 0.18,
+		pinchSpeed: 3.5
 	};
 
 	export let className = '';
