@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import time
 import uuid
 
 import pycrdt as Y
@@ -105,27 +104,11 @@ class RedisDict:
     def items(self):
         return [(k, JSONCodec.loads(v)) for k, v in self.redis.hgetall(self.name).items()]
 
-    def scan_batches(self):
-        """Yield lists of (key, value) pairs via incremental HSCAN; a field may repeat across batches."""
-        cursor = 0
-        while True:
-            cursor, batch = self.redis.hscan(self.name, cursor, count=200)
-            if batch:
-                yield [(k, JSONCodec.loads(v)) for k, v in batch.items()]
-            if cursor == 0:
-                break
-
-    def discard(self, *keys):
-        """Delete fields in one HDEL; no keys is a no-op (HDEL rejects an empty field list)."""
-        if keys:
-            self.redis.hdel(self.name, *keys)
-
-    def set(self, mapping: dict) -> bool:
-        """Replace the hash contents; returns False only when the payload matches this process's last write."""
+    def set(self, mapping: dict):
         if not mapping:
             self.redis.delete(self.name)
             self._last_signature = None
-            return True
+            return
 
         # Serialize values once — reused for both the fingerprint and the write.
         serialized = {k: JSONCodec.dumps(v) for k, v in mapping.items()}
@@ -142,7 +125,7 @@ class RedisDict:
         # still eliminates the majority of redundant writes because each pod
         # typically produces the same model list on consecutive refreshes.
         if signature == self._last_signature:
-            return False
+            return
 
         # Fetch existing keys before writing so we know which ones to remove.
         # HKEYS is cheap — it transfers only short key strings, not large JSON values.
@@ -154,10 +137,10 @@ class RedisDict:
         # We never DELETE the whole hash — this eliminates the race window
         # where concurrent readers would see an empty models dict.
         self.redis.hset(self.name, mapping=serialized)
-        self.discard(*keys_to_remove)
+        if keys_to_remove:
+            self.redis.hdel(self.name, *keys_to_remove)
 
         self._last_signature = signature
-        return True
 
     def get(self, key, default=None):
         try:
@@ -180,66 +163,6 @@ class RedisDict:
         if key not in self:
             self[key] = default
         return self[key]
-
-
-class CachedRedisDict(RedisDict):
-    """Answers reads from a per-process snapshot, refetched at most once per TTL.
-
-    Only suitable for rarely-changing data: the values are shared between concurrent
-    readers, and another worker's writes lag by up to the TTL.
-    """
-
-    TTL_SECONDS = 5
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._cache = {}
-        self._cache_expires_at = 0.0
-
-    def _snapshot(self) -> dict:
-        now = time.monotonic()
-        if now >= self._cache_expires_at:
-            self._cache = {k: JSONCodec.loads(v) for k, v in self.redis.hgetall(self.name).items()}
-            self._cache_expires_at = now + self.TTL_SECONDS
-        return self._cache
-
-    def __getitem__(self, key):
-        return self._snapshot()[key]
-
-    def __contains__(self, key):
-        return key in self._snapshot()
-
-    def __len__(self):
-        return len(self._snapshot())
-
-    def keys(self):
-        return list(self._snapshot().keys())
-
-    def values(self):
-        return list(self._snapshot().values())
-
-    def items(self):
-        return list(self._snapshot().items())
-
-    def __setitem__(self, key, value):
-        super().__setitem__(key, value)
-        self._cache_expires_at = 0.0
-
-    def __delitem__(self, key):
-        super().__delitem__(key)
-        self._cache_expires_at = 0.0
-
-    def set(self, mapping: dict) -> bool:
-        # Drop the snapshot rather than seed it from `mapping`: callers keep
-        # mutating those dicts after handing them over.
-        wrote = super().set(mapping)
-        if wrote:
-            self._cache_expires_at = 0.0
-        return wrote
-
-    def clear(self):
-        super().clear()
-        self._cache_expires_at = 0.0
 
 
 class YdocManager:

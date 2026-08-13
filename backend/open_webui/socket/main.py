@@ -16,12 +16,10 @@ from open_webui.env import (
     GLOBAL_LOG_LEVEL,
     REDIS_KEY_PREFIX,
     WEBSOCKET_EVENT_CALLER_TIMEOUT,
-    WEBSOCKET_HEARTBEAT_INTERVAL,
     WEBSOCKET_MANAGER,
     WEBSOCKET_REDIS_CLUSTER,
     WEBSOCKET_REDIS_LOCK_TIMEOUT,
     WEBSOCKET_REDIS_OPTIONS,
-    WEBSOCKET_REDIS_ROUTING,
     WEBSOCKET_REDIS_URL,
     WEBSOCKET_SENTINEL_HOSTS,
     WEBSOCKET_SENTINEL_PORT,
@@ -36,8 +34,7 @@ from open_webui.models.chats import Chats
 from open_webui.models.folders import Folders
 from open_webui.models.notes import Notes, NoteUpdateForm
 from open_webui.models.users import UserNameResponse, Users
-from open_webui.socket.redis_router import AsyncRedisRouterManager
-from open_webui.socket.utils import CachedRedisDict, RedisDict, RedisLock, YdocManager
+from open_webui.socket.utils import RedisDict, RedisLock, YdocManager
 from open_webui.tasks import create_task, stop_item_tasks
 from open_webui.utils.access_control import has_permission
 from open_webui.utils.auth import get_verified_user_by_token
@@ -49,7 +46,6 @@ from open_webui.utils.redis import (
     get_redis_connection,
     get_sentinels_from_env,
 )
-from socketio.packet import Packet
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
@@ -68,22 +64,6 @@ def get_room_sid_map(manager, namespace: str, room: str):
     return manager.rooms.get(namespace, {}).get(room)
 
 
-class JSONOnlyPacket(Packet):
-    """Packet class that keeps every payload JSON-only.
-
-    Client attachments arrive as int lists, the form the Yjs handlers already store and apply,
-    and nothing server-side builds bytes, so python-socketio's recursive per-emit scan for
-    binary is pure overhead. With it off, an emit that does carry bytes raises in encode()
-    instead of being framed as an attachment.
-    """
-
-    uses_binary_events = False
-
-    @classmethod
-    def reconstruct_binary(cls, data, attachments):
-        return super().reconstruct_binary(data, [list(attachment) for attachment in attachments])
-
-
 if WEBSOCKET_MANAGER == 'redis':
     sentinel_hosts = WEBSOCKET_SENTINEL_HOSTS or ''
     ws_redis_url = (
@@ -91,17 +71,11 @@ if WEBSOCKET_MANAGER == 'redis':
         if sentinel_hosts
         else WEBSOCKET_REDIS_URL
     )
-    if WEBSOCKET_REDIS_ROUTING and WEBSOCKET_REDIS_CLUSTER:
-        # the manager's redis client is not cluster aware, registry keys would MOVED-fail
-        log.warning('WEBSOCKET_REDIS_ROUTING is not supported with WEBSOCKET_REDIS_CLUSTER, using broadcast delivery.')
-    use_router = WEBSOCKET_REDIS_ROUTING and not WEBSOCKET_REDIS_CLUSTER
-    manager_class = AsyncRedisRouterManager if use_router else socketio.AsyncRedisManager
-    redis_manager = manager_class(ws_redis_url, redis_options=WEBSOCKET_REDIS_OPTIONS, json=SOCKETIO_JSON)
+    redis_manager = socketio.AsyncRedisManager(ws_redis_url, redis_options=WEBSOCKET_REDIS_OPTIONS, json=SOCKETIO_JSON)
     sio = socketio.AsyncServer(
         cors_allowed_origins=SOCKETIO_CORS_ORIGINS,
         async_mode='asgi',
         json=SOCKETIO_JSON,
-        serializer=JSONOnlyPacket,
         transports=(['websocket'] if ENABLE_WEBSOCKET_SUPPORT else ['polling']),
         allow_upgrades=ENABLE_WEBSOCKET_SUPPORT,
         always_connect=True,
@@ -116,7 +90,6 @@ else:
         cors_allowed_origins=SOCKETIO_CORS_ORIGINS,
         async_mode='asgi',
         json=SOCKETIO_JSON,
-        serializer=JSONOnlyPacket,
         transports=(['websocket'] if ENABLE_WEBSOCKET_SUPPORT else ['polling']),
         allow_upgrades=ENABLE_WEBSOCKET_SUPPORT,
         always_connect=True,
@@ -129,8 +102,7 @@ else:
 
 # Timeout duration in seconds
 TIMEOUT_DURATION = 3
-# Seconds without heartbeat before a session is reaped; the floor covers clients whose bundle beats every 30s.
-SESSION_POOL_TIMEOUT = max(WEBSOCKET_HEARTBEAT_INTERVAL * 4, 120)
+SESSION_POOL_TIMEOUT = 120  # seconds without heartbeat before session is reaped
 
 # Dictionary to maintain the user pool
 
@@ -144,7 +116,7 @@ if WEBSOCKET_MANAGER == 'redis':
         async_mode=True,
     )
 
-    MODELS = CachedRedisDict(
+    MODELS = RedisDict(
         f'{REDIS_KEY_PREFIX}:models',
         redis_url=WEBSOCKET_REDIS_URL,
         redis_sentinels=ws_sentinels,
@@ -204,7 +176,6 @@ YDOC_MANAGER = YdocManager(
 async def periodic_session_pool_cleanup():
     """Reap orphaned SESSION_POOL entries that missed heartbeats (e.g. crashed instance)."""
     retry_delay = random.uniform(WEBSOCKET_REDIS_LOCK_TIMEOUT / 2, WEBSOCKET_REDIS_LOCK_TIMEOUT)
-    is_redis = WEBSOCKET_MANAGER == 'redis'
     renew_interval = max(WEBSOCKET_REDIS_LOCK_TIMEOUT / 2, 0.5)
     while True:
         if not session_aquire_func():
@@ -219,23 +190,15 @@ async def periodic_session_pool_cleanup():
                     break
 
                 now = int(time.time())
-                batches = SESSION_POOL.scan_batches() if is_redis else [list(SESSION_POOL.items())]
-                for batch in batches:
-                    expired = {
-                        sid: entry.get('id')
-                        for sid, entry in batch
-                        if now - entry.get('last_seen_at', 0) > SESSION_POOL_TIMEOUT
-                    }
-                    if expired:
-                        log.warning('Reaping %d orphaned session(s) (sid: user): %s', len(expired), expired)
-                        if is_redis:
-                            SESSION_POOL.discard(*expired)
-                        else:
-                            for sid in expired:
-                                SESSION_POOL.pop(sid, None)
-                    await asyncio.sleep(0)  # don't hold the loop for the whole sweep
+                for sid in list(SESSION_POOL.keys()):
+                    entry = SESSION_POOL.get(sid)
+                    if entry and now - entry.get('last_seen_at', 0) > SESSION_POOL_TIMEOUT:
+                        log.warning(f'Reaping orphaned session {sid} (user {entry.get("id")})')
+                        try:
+                            del SESSION_POOL[sid]
+                        except KeyError:
+                            pass
 
-                # Renew while waiting so a long SESSION_POOL_TIMEOUT never outlives the lock TTL.
                 next_cleanup_at = time.monotonic() + SESSION_POOL_TIMEOUT
                 lock_lost = False
                 while True:
@@ -317,14 +280,6 @@ def get_user_id_from_session_pool(sid):
     return None
 
 
-async def get_socket_session_user(sid):
-    """Session user from this worker's local Socket.IO store; only locally connected sids are ever looked up."""
-    try:
-        return (await sio.get_session(sid)).get('user')
-    except KeyError:
-        return None
-
-
 def get_session_ids_from_room(room):
     """Get all session IDs from a specific room."""
     members = get_room_sid_map(sio.manager, '/', room)
@@ -338,9 +293,19 @@ def get_session_ids_by_user_id(user_id: str) -> list[str]:
     return list(session_ids)
 
 
-async def get_user_ids_from_room(room):
-    users = [await get_socket_session_user(session_id) for session_id in get_session_ids_from_room(room)]
-    return {user['id'] for user in users if user}
+def get_user_ids_from_room(room):
+    active_session_ids = get_session_ids_from_room(room)
+
+    # Single pool lookup per session (each .get is a Redis round trip
+    # when the session pool is Redis-backed).
+    active_user_ids = list(
+        {
+            entry['id']
+            for entry in (SESSION_POOL.get(session_id) for session_id in active_session_ids)
+            if entry is not None
+        }
+    )
+    return active_user_ids
 
 
 async def emit_to_users(event: str, data: dict, user_ids: list[str]):
@@ -383,19 +348,12 @@ async def disconnect_user_sessions(user_id: str):
     The client will automatically reconnect and re-authenticate with
     fresh data from the database.
     """
-    try:
-        session_ids = get_session_ids_by_user_id(user_id)
-    except Exception:
-        # Non-fatal: whatever changed the user is already committed.
-        log.exception('Failed to look up sessions for user %s', user_id)
-        return
-
+    session_ids = get_session_ids_by_user_id(user_id)
     for sid in session_ids:
         try:
             await sio.disconnect(sid)
-        except Exception as e:
-            log.warning('Failed to disconnect session %s for user %s: %s', sid, user_id, e)
-
+        except Exception:
+            log.exception('Failed to disconnect session %s for user %s', sid, user_id)
 
     if session_ids:
         log.info('Requested disconnect of %s session(s) for user %s', len(session_ids), user_id)
@@ -403,7 +361,7 @@ async def disconnect_user_sessions(user_id: str):
 
 @sio.on('usage')
 async def usage(sid, data):
-    if await get_socket_session_user(sid):
+    if sid in SESSION_POOL:
         model_id = data['model']
         # Record the timestamp for the last update
         current_time = int(time.time())
@@ -485,7 +443,7 @@ async def user_join(sid, data):
 
 @sio.on('heartbeat')
 async def heartbeat(sid, data):
-    user = await get_socket_session_user(sid)
+    user = SESSION_POOL.get(sid)
     if user:
         SESSION_POOL[sid] = {**user, 'last_seen_at': int(time.time())}
         await Users.update_last_active_by_id(user['id'])
@@ -558,7 +516,7 @@ async def channel_events(sid, data):
     event_data = data['data']
     event_type = event_data['type']
 
-    user = await get_socket_session_user(sid)
+    user = SESSION_POOL.get(sid)
 
     if not user:
         return
@@ -598,7 +556,15 @@ async def get_folder_unread_counts(user_id: str) -> dict[str, int]:
 
 @sio.on('events:chat')
 async def chat_events(sid, data):
-    user = await get_socket_session_user(sid)
+    try:
+        session = await sio.get_session(sid)
+        user = session.get('user')
+    except KeyError:
+        user = None
+
+    if not user:
+        user = SESSION_POOL.get(sid)
+
     if not user:
         return
 
@@ -652,7 +618,7 @@ def normalize_document_id(document_id: str) -> str:
 @sio.on('ydoc:document:join')
 async def ydoc_document_join(sid, data):
     """Handle user joining a document"""
-    user = await get_socket_session_user(sid)
+    user = SESSION_POOL.get(sid)
     if not user:
         return
 
@@ -812,7 +778,7 @@ async def yjs_document_update(sid, data):
             return
 
         # Verify write permission — room membership only proves read access
-        user = await get_socket_session_user(sid)
+        user = SESSION_POOL.get(sid)
         if not user:
             return
 
@@ -877,7 +843,7 @@ async def yjs_document_update(sid, data):
 @sio.on('ydoc:document:leave')
 async def yjs_document_leave(sid, data):
     """Handle user leaving a document"""
-    user = await get_socket_session_user(sid)
+    user = SESSION_POOL.get(sid)
     if not user:  # authenticated session required (parity with sibling handlers)
         return
     try:
@@ -909,7 +875,7 @@ async def yjs_document_leave(sid, data):
 @sio.on('ydoc:awareness:update')
 async def yjs_awareness_update(sid, data):
     """Handle awareness updates (cursors, selections, etc.)"""
-    user = await get_socket_session_user(sid)
+    user = SESSION_POOL.get(sid)
     if not user:  # authenticated session required (parity with sibling handlers)
         return
     try:
@@ -933,22 +899,23 @@ async def yjs_awareness_update(sid, data):
 
 @sio.event
 async def disconnect(sid, reason=None):
-    try:
+    if sid in SESSION_POOL:
         del SESSION_POOL[sid]
-    except KeyError:
+
+        # Clean up USAGE_POOL entries for this session
+        for model_id in list(USAGE_POOL.keys()):
+            connections = USAGE_POOL.get(model_id)
+            if connections and sid in connections:
+                del connections[sid]
+                if not connections:
+                    del USAGE_POOL[model_id]
+                else:
+                    USAGE_POOL[model_id] = connections
+
+        await YDOC_MANAGER.remove_user_from_all_documents(sid)
+    else:
         pass
-
-    # Clean up USAGE_POOL entries for this session
-    for model_id in list(USAGE_POOL.keys()):
-        connections = USAGE_POOL.get(model_id)
-        if connections and sid in connections:
-            del connections[sid]
-            if not connections:
-                del USAGE_POOL[model_id]
-            else:
-                USAGE_POOL[model_id] = connections
-
-    await YDOC_MANAGER.remove_user_from_all_documents(sid)
+        # print(f"Unknown session ID {sid} disconnected")
 
 
 async def _make_channel_emitter(request_info):
@@ -1175,9 +1142,6 @@ async def get_event_call(request_info):
                 timeout=WEBSOCKET_EVENT_CALLER_TIMEOUT,
             )
         except (TimeoutError, socketio.exceptions.TimeoutError):
-            # no eviction: the session may just be slow to ack (backgrounded tab,
-            # pending interactive prompt) and the client never auto-reconnects
-            # after a server-side disconnect, so killing it would strand the tab
             log.warning(f'Event caller timed out for session {session_id}')
             return {'error': 'Event call timed out. The browser tab may be inactive or closed.'}
 

@@ -37,8 +37,6 @@ from sqlalchemy.pool import NullPool, QueuePool
 from sqlalchemy.sql.type_api import _T
 from typing_extensions import Self
 
-from open_webui.utils.json_codec import JSONCodec
-
 log = logging.getLogger(__name__)
 
 

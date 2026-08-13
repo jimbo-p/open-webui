@@ -213,15 +213,13 @@
 				}
 			}
 
-			heartbeatInterval = setInterval(
-				() => {
-					if (_socket.connected) {
-						console.log('Sending heartbeat');
-						_socket.emit('heartbeat', {});
-					}
-				},
-				($config?.features?.websocket_heartbeat_interval ?? 30) * 1000
-			);
+			// Send heartbeat every 30 seconds
+			heartbeatInterval = setInterval(() => {
+				if (_socket.connected) {
+					console.log('Sending heartbeat');
+					_socket.emit('heartbeat', {});
+				}
+			}, 30000);
 
 			if (deploymentId !== null) {
 				WEBUI_DEPLOYMENT_ID.set(deploymentId);
@@ -268,8 +266,6 @@
 				heartbeatInterval = null;
 			}
 
-			// socket.io never retries a server-initiated disconnect, and the server uses one to drop
-			// sessions holding stale user data. Reconnecting re-reads that data from the database.
 			if (reason === 'io server disconnect') {
 				_socket.connect();
 			}
