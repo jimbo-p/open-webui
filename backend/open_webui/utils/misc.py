@@ -258,7 +258,6 @@ def reconcile_tool_pairs(messages: list[dict]) -> list[dict]:
     return reconciled_messages
 
 
-
 def usable_reasoning_details(details) -> list:
     """Drop Anthropic reasoning entries that cannot be replayed.
 

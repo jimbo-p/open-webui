@@ -203,7 +203,6 @@ def output_id(prefix: str) -> str:
     return f'{prefix}_{uuid4().hex[:24]}'
 
 
-
 def extract_reasoning_details(payload) -> list:
     """Read reasoning_details from the message or OpenRouter-style provider_specific_fields.
 
