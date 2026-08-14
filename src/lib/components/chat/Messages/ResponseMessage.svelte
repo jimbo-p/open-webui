@@ -160,6 +160,7 @@
 	export let forkHandler: Function | null = null;
 
 	export let addMessages: Function;
+	export let onToolCallResolved: Function = () => {};
 
 	export let isLastMessage = true;
 	export let readOnly = false;
@@ -815,6 +816,8 @@
 								<!-- unless message.error === true which is legacy error handling, where the error message is stored in message.content -->
 								<ContentRenderer
 									id={`${chatId}-${message.id}`}
+									{chatId}
+									messageId={message.id}
 									content={message.content}
 									output={message.output}
 									sources={message.sources}
@@ -833,6 +836,7 @@
 									onTaskClick={async (e) => {
 										console.log(e);
 									}}
+									{onToolCallResolved}
 									onSourceClick={async (id) => {
 										console.log(id);
 

@@ -293,9 +293,18 @@ def convert_output_to_messages(
     pending_reasoning = []  # Only populated when reasoning_format == 'reasoning_content'
     pending_reasoning_details = []
     pending_tool_image_urls = []
-    function_call_ids = {
-        item.get('call_id') for item in output if item.get('type') == 'function_call' and item.get('call_id')
+    pending_tool_outputs = []
+    completed_call_ids = {
+        item.get('call_id')
+        for item in output
+        if item.get('type') == 'function_call'
+        and item.get('call_id')
+        and item.get('status') in {'completed', 'rejected'}
     }
+    result_call_ids = {
+        item.get('call_id') for item in output if item.get('type') == 'function_call_output' and item.get('call_id')
+    }
+    function_call_ids = completed_call_ids & result_call_ids
 
     def flush_pending():
         nonlocal pending_content, pending_tool_calls, pending_reasoning, pending_reasoning_details
@@ -339,9 +348,60 @@ def convert_output_to_messages(
         )
         pending_tool_image_urls = []
 
+    def flush_tool_outputs():
+        nonlocal pending_tool_outputs
+        if not pending_tool_outputs:
+            return
+
+        flush_pending()
+        for output_item in pending_tool_outputs:
+            output_parts = output_item.get('output', [])
+            content = ''
+            image_urls = []
+            for part in output_parts:
+                if part.get('type') == 'input_text':
+                    output_text = part.get('text', '')
+                    content += str(output_text) if not isinstance(output_text, str) else output_text
+                elif part.get('type') == 'input_image':
+                    url = part.get('image_url', '')
+                    if url:
+                        image_urls.append(url)
+
+            if flatten_tool_images:
+                messages.append(
+                    {
+                        'role': 'tool',
+                        'tool_call_id': output_item.get('call_id', ''),
+                        'content': content,
+                    }
+                )
+                pending_tool_image_urls.extend(image_urls)
+            elif image_urls:
+                messages.append(
+                    {
+                        'role': 'tool',
+                        'tool_call_id': output_item.get('call_id', ''),
+                        'content': [
+                            {'type': 'input_text', 'text': content},
+                            *[{'type': 'input_image', 'image_url': url} for url in image_urls],
+                        ],
+                    }
+                )
+            else:
+                messages.append(
+                    {
+                        'role': 'tool',
+                        'tool_call_id': output_item.get('call_id', ''),
+                        'content': content,
+                    }
+                )
+
+        pending_tool_outputs = []
+
     for item in output:
         item_type = item.get('type', '')
-        if item_type != 'function_call_output':
+        if item_type not in {'function_call', 'function_call_output'}:
+            flush_tool_outputs()
             flush_tool_images()
 
         if item_type == 'message':
@@ -355,6 +415,9 @@ def convert_output_to_messages(
                 pending_content.append(text)
 
         elif item_type == 'function_call':
+            if item.get('call_id') not in function_call_ids:
+                continue
+
             # Collect tool calls to batch into assistant message
             arguments = item.get('arguments', '{}')
             # Ensure arguments is always a JSON string
@@ -372,51 +435,10 @@ def convert_output_to_messages(
             )
 
         elif item_type == 'function_call_output':
-            # Flush any pending content/tool_calls before adding tool result
-            flush_pending()
+            if item.get('call_id') not in function_call_ids:
+                continue
 
-            # Extract text and images from output content parts
-            output_parts = item.get('output', [])
-            content = ''
-            image_urls = []
-            for part in output_parts:
-                if part.get('type') == 'input_text':
-                    output_text = part.get('text', '')
-                    content += str(output_text) if not isinstance(output_text, str) else output_text
-                elif part.get('type') == 'input_image':
-                    url = part.get('image_url', '')
-                    if url:
-                        image_urls.append(url)
-
-            if flatten_tool_images:
-                messages.append(
-                    {
-                        'role': 'tool',
-                        'tool_call_id': item.get('call_id', ''),
-                        'content': content,
-                    }
-                )
-                if item.get('call_id') in function_call_ids:
-                    pending_tool_image_urls.extend(image_urls)
-            elif image_urls:
-                messages.append(
-                    {
-                        'role': 'tool',
-                        'tool_call_id': item.get('call_id', ''),
-                        'content': [
-                            {'type': 'input_text', 'text': content},
-                            *[{'type': 'input_image', 'image_url': url} for url in image_urls],
-                        ],
-                    }
-                )
-            else:
-                messages.append(
-                    {
-                        'role': 'tool',
-                        'tool_call_id': item.get('call_id', ''),
-                        'content': content,
-                    }
-                )
+            pending_tool_outputs.append(item)
 
         elif item_type == 'reasoning':
             reasoning_details = item.get('reasoning_details') if raw else None
@@ -470,6 +492,7 @@ def convert_output_to_messages(
             pass
 
     # Flush remaining content/tool_calls
+    flush_tool_outputs()
     flush_tool_images()
     flush_pending()
 

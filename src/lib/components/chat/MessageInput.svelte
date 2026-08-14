@@ -104,6 +104,7 @@
 	import Knobs from '../icons/Knobs.svelte';
 	import ValvesModal from '../workspace/common/ValvesModal.svelte';
 	import Note from '../icons/Note.svelte';
+	import AskUserCard from './AskUserCard.svelte';
 	import { goto } from '$app/navigation';
 	import InputModal from '../common/InputModal.svelte';
 	import Expand from '../icons/Expand.svelte';
@@ -111,6 +112,15 @@
 	import TaskList from './Messages/ResponseMessage/TaskList.svelte';
 
 	const i18n = getContext('i18n');
+
+	type AskUserPrompt = {
+		show: boolean;
+		questions: any[];
+		allowOther: boolean;
+		timeoutMs: number | null;
+		onConfirm: (value: any) => void;
+		onCancel: () => void;
+	};
 
 	export let onUpload: Function = (e) => {};
 	export let onChange: Function = () => {};
@@ -143,11 +153,20 @@
 
 	export let history;
 	export let taskIds = null;
+	export let askUser: AskUserPrompt = {
+		show: false,
+		questions: [],
+		allowOther: true,
+		timeoutMs: null,
+		onConfirm: (_value: any) => {},
+		onCancel: () => {}
+	};
 
 	$: isActive =
-		(taskIds && taskIds.length > 0) ||
-		(history.currentId && history.messages[history.currentId]?.done != true) ||
-		generating;
+		!askUser?.show &&
+		((taskIds && taskIds.length > 0) ||
+			(history.currentId && history.messages[history.currentId]?.done != true) ||
+			generating);
 	$: canCompact = !!history?.currentId;
 
 	export let prompt = '';
@@ -160,6 +179,8 @@
 	export let imageGenerationEnabled = false;
 	export let webSearchEnabled = false;
 	export let codeInterpreterEnabled = false;
+	export let toolApprovalMode = 'full';
+	export let onToolApprovalModeChange: Function = () => {};
 
 	export let pendingOAuthTools = [];
 
@@ -170,7 +191,6 @@
 	export let onQueueEdit: (id: string) => void = () => {};
 	export let onQueueDelete: (id: string) => void = () => {};
 	export let onUpdate: (data?: { file?: any }) => void = () => {};
-
 	export let chatTasks = [];
 
 	let inputContent = null;
@@ -207,7 +227,8 @@
 		selectedFilterIds,
 		imageGenerationEnabled,
 		webSearchEnabled,
-		codeInterpreterEnabled
+		codeInterpreterEnabled,
+		toolApprovalMode
 	});
 
 	const inputVariableHandler = async (text: string): Promise<string> => {
@@ -1580,6 +1601,23 @@
 							on:click={() => createMessagePair(prompt)}
 						/>
 
+						{#if askUser?.show}
+							<div class="mx-1">
+								<AskUserCard
+									show={askUser.show}
+									questions={askUser.questions}
+									allowOther={askUser.allowOther}
+									timeoutMs={askUser.timeoutMs}
+									on:confirm={(e) => {
+										askUser.onConfirm(e.detail);
+									}}
+									on:cancel={() => {
+										askUser.onCancel();
+									}}
+								/>
+							</div>
+						{/if}
+
 						<!-- Task list display -->
 						{#if isActive && chatTasks.length > 0}
 							<div class="mx-1">
@@ -2010,6 +2048,8 @@
 										bind:files
 										selectedModels={selectedModelIds}
 										{fileUploadCapableModels}
+										{toolApprovalMode}
+										{onToolApprovalModeChange}
 										{screenCaptureHandler}
 										{inputFilesHandler}
 										uploadFilesHandler={() => {

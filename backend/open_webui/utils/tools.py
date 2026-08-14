@@ -47,6 +47,7 @@ from open_webui.models.tools import Tools
 from open_webui.models.users import UserModel
 from open_webui.tools.builtin import (
     add_memory,
+    ask_user,
     calculate_timestamp,
     create_automation,
     create_calendar_event,
@@ -541,9 +542,9 @@ async def get_builtin_tools(
 
     # Helper to check if a builtin tool category is enabled via meta.builtinTools
     # Defaults to True if not specified (backward compatible)
-    def is_builtin_tool_enabled(category: str) -> bool:
+    def is_builtin_tool_enabled(category: str, default: bool = True) -> bool:
         builtin_tools = model.get('info', {}).get('meta', {}).get('builtinTools', {})
-        return builtin_tools.get(category, True)
+        return builtin_tools.get(category, default)
 
     # Helper to check user-level feature permission (admins always pass)
     user = extra_params.get('__user__', {})
@@ -582,6 +583,9 @@ async def get_builtin_tools(
     # Time utilities - available for date calculations
     if is_builtin_tool_enabled('time'):
         builtin_functions.extend([get_current_timestamp, calculate_timestamp])
+
+    if is_builtin_tool_enabled('user_input', True):
+        builtin_functions.append(ask_user)
 
     metadata = extra_params.get('__metadata__') or {}
     chat_files = metadata.get('files') or extra_params.get('__files__') or []

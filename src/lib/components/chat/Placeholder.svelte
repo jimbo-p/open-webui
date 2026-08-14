@@ -54,6 +54,8 @@
 	export let imageGenerationEnabled = false;
 	export let codeInterpreterEnabled = false;
 	export let webSearchEnabled = false;
+	export let toolApprovalMode = 'full';
+	export let onToolApprovalModeChange: Function = () => {};
 
 	export let onUpload: Function = (e) => {};
 	export let onUpdate: (data?: { file?: any }) => void = () => {};
@@ -64,8 +66,14 @@
 	export let onQueueSendNow: (id: string) => void = () => {};
 	export let onQueueEdit: (id: string) => void = () => {};
 	export let onQueueDelete: (id: string) => void = () => {};
-
-	export let toolServers = [];
+	export let askUser = {
+		show: false,
+		questions: [],
+		allowOther: true,
+		timeoutMs: null,
+		onConfirm: (_value: any) => {},
+		onCancel: () => {}
+	};
 
 	export let dragged = false;
 
@@ -238,7 +246,8 @@
 						bind:showCommands
 						bind:dragged
 						{pendingOAuthTools}
-						{toolServers}
+						{toolApprovalMode}
+						{onToolApprovalModeChange}
 						{stopResponse}
 						{createMessagePair}
 						placeholder={$i18n.t('How can I help you today?')}
@@ -249,6 +258,7 @@
 						{onQueueSendNow}
 						{onQueueEdit}
 						{onQueueDelete}
+						{askUser}
 						{onWebSearchToggle}
 						on:chatVariables
 						on:submit={(e) => {
