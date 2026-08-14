@@ -112,22 +112,22 @@
 	import TaskList from './Messages/ResponseMessage/TaskList.svelte';
 
 	const isHeifFamily = (file) => {
-	const type = (file?.type || '').toLowerCase();
-	if (
-		type === 'image/heic' ||
-		type === 'image/heif' ||
-		type === 'image/heic-sequence' ||
-		type === 'image/heif-sequence'
-	) {
-		return true;
-	}
-	// Fallback: some browsers/OSes send an empty or generic type for HEIC files.
-	// Fall back to checking the filename extension in that case.
-	if (!type || type === 'application/octet-stream') {
-		return /\.(heic|heif)$/i.test(file?.name || '');
-	}
-	return false;
-    };
+		const type = (file?.type || '').toLowerCase();
+		if (
+			type === 'image/heic' ||
+			type === 'image/heif' ||
+			type === 'image/heic-sequence' ||
+			type === 'image/heif-sequence'
+		) {
+			return true;
+		}
+		// Fallback: some browsers/OSes send an empty or generic type for HEIC files.
+		// Fall back to checking the filename extension in that case.
+		if (!type || type === 'application/octet-stream') {
+			return /\.(heic|heif)$/i.test(file?.name || '');
+		}
+		return false;
+	};
 
 	const i18n = getContext('i18n');
 
@@ -1011,7 +1011,7 @@
 				return;
 			}
 
-			if (file['type'].startsWith('image/') || isHeifFamily(file))  {
+			if (file['type'].startsWith('image/') || isHeifFamily(file)) {
 				if (visionCapableModels.length === 0) {
 					toast.error($i18n.t('Selected model(s) do not support image inputs'));
 					return;
@@ -1052,7 +1052,6 @@
 					}
 					return imageUrl;
 				};
-				
 
 				let reader = new FileReader();
 
