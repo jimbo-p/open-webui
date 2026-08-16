@@ -1427,6 +1427,10 @@
 
 								if (chat) {
 									console.log(chat);
+									if (!chat.folder_id && !chat.pinned) {
+										return;
+									}
+
 									if (chat.folder_id) {
 										const res = await updateChatFolderIdById(
 											localStorage.token,
