@@ -110,6 +110,7 @@ from open_webui.utils.misc import (
     get_last_user_message_item,
     get_message_list,
     get_output_text,
+    get_reasoning_details,
     get_system_message,
     is_string_allowed,
     merge_system_messages,
@@ -201,30 +202,6 @@ def _start_tag_pattern(start_tag: str) -> str:
 def output_id(prefix: str) -> str:
     """Generate OR-style ID: prefix + 24-char hex UUID."""
     return f'{prefix}_{uuid4().hex[:24]}'
-
-
-def extract_reasoning_details(payload) -> list:
-    """Read reasoning_details from the message or OpenRouter-style provider_specific_fields.
-
-    Anthropic-via-OpenRouter puts the thinking signature on
-    message.provider_specific_fields.reasoning_details, not the top-level
-    reasoning_details key. Missing that copy drops the signature on save and
-    the next turn 400s (issue #27467).
-    """
-    if not isinstance(payload, dict):
-        return []
-
-    details = payload.get('reasoning_details')
-    if not details:
-        provider = payload.get('provider_specific_fields') or {}
-        if isinstance(provider, dict):
-            details = provider.get('reasoning_details')
-
-    if isinstance(details, list):
-        return [item for item in details if isinstance(item, dict)]
-    if isinstance(details, dict):
-        return [details]
-    return []
 
 
 def merge_streamed_reasoning_details(target: list, details) -> None:
@@ -496,6 +473,23 @@ def deep_merge(target, source):
         return target + source
     else:
         return source
+
+
+RESPONSE_COMPLETION_RESPONSE_FIELDS = ('error', 'id', 'output', 'usage')
+
+
+def get_response_completion_event_data(event: dict) -> dict:
+    """Build the data payload for response:completion events."""
+    response = event.get('response')
+    if not isinstance(response, dict):
+        return event
+
+    response_data = {key: response[key] for key in RESPONSE_COMPLETION_RESPONSE_FIELDS if key in response}
+
+    return {
+        **event,
+        'response': response_data,
+    }
 
 
 def handle_responses_streaming_event(
@@ -1675,12 +1669,6 @@ async def chat_image_generation_handler(request: Request, form_data: dict, extra
         message_list = form_data.get('messages', [])
     else:
         chat = await Chats.get_chat_by_id_and_user_id(chat_id, user.id)
-        await __event_emitter__(
-            {
-                'type': 'status',
-                'data': {'description': 'Creating image', 'done': False},
-            }
-        )
 
         messages_map = chat.chat.get('history', {}).get('messages', {})
         message_id = chat.chat.get('history', {}).get('currentId')
@@ -1700,9 +1688,22 @@ async def chat_image_generation_handler(request: Request, form_data: dict, extra
         for image in images:
             input_images.append(image)
 
+    # Called directly, bypassing the /images routes that enforce these switches.
+    editing = len(input_images) > 0 and await Config.get('images.edit.enable')
+    if not editing and not await Config.get('image_generation.enable'):
+        return form_data
+
+    if is_saved_chat_id(chat_id):
+        await __event_emitter__(
+            {
+                'type': 'status',
+                'data': {'description': 'Creating image', 'done': False},
+            }
+        )
+
     system_message_content = ''
 
-    if len(input_images) > 0 and await Config.get('images.edit.enable'):
+    if editing:
         # Edit image(s)
         try:
             images = await image_edits(
@@ -2061,13 +2062,14 @@ def get_reasoning_format(model: dict) -> str | None:
     Determine how reasoning should be included in reconstructed messages.
 
     Returns:
-        'think_tags': Ollama expects <think> tags in content.
+        'thinking': Ollama expects reasoning in the native thinking field.
+        'think_tags': wrap reasoning in <think> tags inside content.
         'reasoning_content': llama.cpp supports reasoning_content as a top-level field.
         None: skip reasoning (safe default for strict providers).
     """
     provider = model.get('provider', '')
-    if provider == 'ollama':
-        return 'think_tags'
+    if model.get('owned_by') == 'ollama':
+        return 'thinking'
     if provider == 'llama.cpp':
         return 'reasoning_content'
     return None
@@ -2535,7 +2537,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             ):
                 form_data = await add_memory_context(request, form_data, user, model)
 
-        if 'web_search' in features and features['web_search']:
+        if 'web_search' in features and features['web_search'] and await Config.get('web.search.enable'):
             # features is client-supplied; re-check the permission the native FC path enforces.
             if getattr(user, 'role', None) == 'admin' or await has_permission(
                 getattr(user, 'id', ''),
@@ -3925,7 +3927,7 @@ async def non_streaming_chat_response_handler(response, ctx):
                     if not response_output:
                         choice_message = choices[0].get('message', {})
                         reasoning_content = choice_message.get('reasoning_content') or choice_message.get('reasoning')
-                        reasoning_details = extract_reasoning_details(choice_message)
+                        reasoning_details = get_reasoning_details(choice_message)
                         response_output = []
                         if reasoning_content or reasoning_details:
                             reasoning_item = {
@@ -4585,7 +4587,7 @@ async def streaming_chat_response_handler(response, ctx):
                         await event_emitter(
                             {
                                 'type': 'response:completion',
-                                'data': response_data,
+                                'data': get_response_completion_event_data(response_data),
                             }
                         )
                         await save_current_response_stream(stream_output)
@@ -4966,7 +4968,14 @@ async def streaming_chat_response_handler(response, ctx):
                                         or delta.get('reasoning')
                                         or delta.get('thinking')
                                     )
-                                    reasoning_detail_items = extract_reasoning_details(delta)
+                                    reasoning_details = get_reasoning_details(delta)
+                                    reasoning_detail_items = (
+                                        [item for item in reasoning_details if isinstance(item, dict)]
+                                        if isinstance(reasoning_details, list)
+                                        else [reasoning_details]
+                                        if isinstance(reasoning_details, dict)
+                                        else []
+                                    )
                                     existing_reasoning_item = next(
                                         (item for item in reversed(output) if item.get('type') == 'reasoning'),
                                         None,

@@ -258,24 +258,15 @@ def reconcile_tool_pairs(messages: list[dict]) -> list[dict]:
     return reconciled_messages
 
 
-def usable_reasoning_details(details) -> list:
-    """Drop Anthropic reasoning entries that cannot be replayed.
+def get_reasoning_details(payload: dict):
+    if not isinstance(payload, dict):
+        return None
 
-    A stored `reasoning.text` with format anthropic-claude-v1 and no
-    `signature` is rejected by the provider on the next turn.
-    """
-    if not details:
-        return []
-    items = details if isinstance(details, list) else [details]
-    usable = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        fmt = str(item.get('format') or '')
-        if 'anthropic' in fmt and not item.get('signature'):
-            continue
-        usable.append(item)
-    return usable
+    provider_fields = payload.get('provider_specific_fields') or {}
+    provider_details = (
+        provider_fields.get('reasoning_details') if isinstance(provider_fields, dict) else None
+    )
+    return payload.get('reasoning_details') or provider_details
 
 
 def convert_output_to_messages(
@@ -297,8 +288,10 @@ def convert_output_to_messages(
              follow-ups.
         reasoning_format: How to include reasoning blocks in the output:
             - None: skip reasoning (default, safe for strict providers).
+            - ``'thinking'``: set as ``thinking`` top-level field
+              (for native Ollama).
             - ``'think_tags'``: wrap in ``<think>`` tags inside content
-              (for Ollama, which expects reasoning as tagged content).
+              (for legacy providers that expect reasoning as tagged content).
             - ``'reasoning_content'``: set as ``reasoning_content`` top-level field
               (for llama.cpp, which routes it via the chat template).
         flatten_tool_images: Move tool output images into a following user
@@ -310,7 +303,7 @@ def convert_output_to_messages(
     messages = []
     pending_tool_calls = []
     pending_content = []
-    pending_reasoning = []  # Only populated when reasoning_format == 'reasoning_content'
+    pending_reasoning = []  # Only populated for top-level structured reasoning fields.
     pending_reasoning_details = []
     pending_tool_image_urls = []
     pending_tool_outputs = []
@@ -338,7 +331,10 @@ def convert_output_to_messages(
         }
 
         if pending_reasoning:
-            message['reasoning_content'] = '\n'.join(pending_reasoning)
+            if reasoning_format == 'thinking':
+                message['thinking'] = '\n'.join(pending_reasoning)
+            else:
+                message['reasoning_content'] = '\n'.join(pending_reasoning)
 
         if pending_reasoning_details:
             message['reasoning_details'] = pending_reasoning_details
@@ -461,7 +457,15 @@ def convert_output_to_messages(
             pending_tool_outputs.append(item)
 
         elif item_type == 'reasoning':
-            reasoning_details = usable_reasoning_details(item.get('reasoning_details')) if raw else []
+            reasoning_details = item.get('reasoning_details') if raw else None
+            if reasoning_details:
+                reasoning_details = reasoning_details if isinstance(reasoning_details, list) else [reasoning_details]
+                reasoning_details = [
+                    detail
+                    for detail in reasoning_details
+                    if isinstance(detail, dict)
+                    and (detail.get('format') != 'anthropic-claude-v1' or detail.get('signature'))
+                ]
             if not reasoning_format and not reasoning_details:
                 continue
 
@@ -475,18 +479,16 @@ def convert_output_to_messages(
 
             if reasoning_text:
                 if reasoning_format == 'think_tags':
-                    # Ollama: embed in content with the item's original tags
+                    # Legacy tag replay: embed in content with the item's original tags.
                     start_tag = item.get('start_tag', '<think>')
                     end_tag = item.get('end_tag', '</think>')
                     pending_content.append(f'{start_tag}{reasoning_text}{end_tag}')
-                elif reasoning_format == 'reasoning_content':
-                    # llama.cpp: collect for reasoning_content field
+                elif reasoning_format in {'thinking', 'reasoning_content'}:
+                    # Native providers: collect for their top-level reasoning field.
                     pending_reasoning.append(reasoning_text)
 
             if reasoning_details:
-                pending_reasoning_details.extend(
-                    reasoning_details if isinstance(reasoning_details, list) else [reasoning_details]
-                )
+                pending_reasoning_details.extend(reasoning_details)
 
         elif item_type == 'open_webui:code_interpreter':
             # Always include code interpreter content so the LLM knows
@@ -829,6 +831,17 @@ def sanitize_filename(file_name):
     final_file_name = re.sub(r'\s+', '-', sanitized_file_name)
 
     return final_file_name
+
+
+def json_text_variants(value: str) -> list[str]:
+    """Both spellings ``value`` can take inside a serialized JSON column, unquoted.
+
+    Encoders disagree on non-ASCII — stdlib escapes it to ``\\uXXXX``, orjson writes it
+    raw — so a LIKE against the stored text has to accept either. ASCII collapses to one.
+    """
+    raw = JSONCodec.dumps(value, ensure_ascii=False)[1:-1]
+    escaped = JSONCodec.dumps(value, ensure_ascii=True)[1:-1]
+    return [raw] if raw == escaped else [raw, escaped]
 
 
 def sanitize_text_for_db(text: str) -> str:

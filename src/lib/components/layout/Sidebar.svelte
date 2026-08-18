@@ -22,7 +22,7 @@
 		socket,
 		config,
 		isApp,
-		models,
+		visiblePinnedModels,
 		selectedFolder,
 		WEBUI_NAME,
 		sidebarWidth
@@ -120,9 +120,7 @@
 
 	let showCreateFolderModal = false;
 
-	let pinnedModels = [];
-
-	let showPinnedModels = false;
+	let showPinnedModels = true;
 	let showPinnedNotes = false;
 	let showChannels = false;
 	let showFolders = false;
@@ -683,12 +681,6 @@
 						navElement.style['-webkit-app-region'] = 'drag';
 					}
 				}
-			}),
-			settings.subscribe((value) => {
-				if (pinnedModels != value?.pinnedModels ?? []) {
-					pinnedModels = value?.pinnedModels ?? [];
-					showPinnedModels = pinnedModels.length > 0;
-				}
 			})
 		];
 
@@ -709,7 +701,12 @@
 		socketInstance?.on('events', chatActiveEventHandler);
 		socketInstance?.on('connect', refreshChatRows);
 
-		const unregisterFolderRefreshHandler = registerFolderRefreshHandler((folderId, chat) => {
+		const unregisterFolderRefreshHandler = registerFolderRefreshHandler(async (folderId, chat) => {
+			// null refreshes the folder tree; undefined refreshes all folder chat lists.
+			if (folderId === null) {
+				return initFolders();
+			}
+
 			if (folderId) {
 				if (chat) {
 					return folderRegistry[folderId]?.upsertChat?.(chat);
@@ -1285,7 +1282,7 @@
 						</div>
 					</div>
 
-					{#if ($models ?? []).length > 0 && (($settings?.pinnedModels ?? []).length > 0 || $config?.default_pinned_models)}
+					{#if $visiblePinnedModels.length > 0}
 						<SidebarSection
 							id="sidebar-models"
 							bind:open={showPinnedModels}

@@ -129,7 +129,7 @@ RUN chown -R $UID:$GID /app $HOME
 # Install common system dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    git build-essential pandoc gcc netcat-openbsd curl jq ca-certificates \
+    git build-essential pandoc gcc curl jq ca-certificates \
     libmariadb-dev \
     python3-dev \
     ffmpeg libsm6 libxext6 zstd \
@@ -177,6 +177,7 @@ RUN set -e; \
     fi; \
     fi; \
     mkdir -p /app/backend/data; chown -R $UID:$GID /app/backend/data/; \
+    if [ -d /app/backend/data/cache ]; then chmod -R a+rX /app/backend/data/cache; fi; \
     rm -rf /var/lib/apt/lists/*;
 
 # Optional: PPTX parsing through unstructured may need spaCy's English model.

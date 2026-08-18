@@ -70,6 +70,7 @@ from open_webui.utils.auth import (
     get_password_hash,
     get_verified_user,
     invalidate_token,
+    revoke_user_tokens,
     validate_password,
     verify_password,
 )
@@ -406,6 +407,7 @@ async def update_password(
             hashed = await get_password_hash(form_data.new_password)
             success = await Auths.update_user_password_by_id(user.id, hashed, db=db)
             if success:
+                await revoke_user_tokens(request, user.id)
                 await publish_event(
                     request,
                     EVENTS.AUTH_PASSWORD_CHANGED,
@@ -961,6 +963,9 @@ async def signout(request: Request, response: Response, db: AsyncSession = Depen
     if token is None:
         token = request.cookies.get('token')
 
+    oauth_session_id = request.cookies.get('oauth_session_id')
+    session = await OAuthSessions.get_session_by_id(oauth_session_id, db=db) if oauth_session_id else None
+
     if token:
         actor = None
         data = decode_token(token)
@@ -973,6 +978,7 @@ async def signout(request: Request, response: Response, db: AsyncSession = Depen
             actor=actor,
             subject_id=actor.id if actor else None,
             subject_type='user' if actor else None,
+            **({'source': 'oauth', 'data': {'auth_method': 'oauth', 'provider': session.provider}} if session else {}),
         )
 
     response.delete_cookie('token')
@@ -984,11 +990,8 @@ async def signout(request: Request, response: Response, db: AsyncSession = Depen
     response.delete_cookie('oui-session')
     response.delete_cookie('oauth_id_token')
 
-    oauth_session_id = request.cookies.get('oauth_session_id')
     if oauth_session_id:
         response.delete_cookie('oauth_session_id')
-
-        session = await OAuthSessions.get_session_by_id(oauth_session_id, db=db)
 
         # If a custom end_session_endpoint is configured (e.g. AWS Cognito), redirect
         # there directly instead of attempting OIDC discovery.
@@ -1703,6 +1706,22 @@ async def token_exchange(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail='User not found. Please sign in via the web interface first.',
+        )
+
+    user = await oauth_manager.update_user_role_from_oauth(
+        request=request,
+        user=user,
+        user_data=user_data,
+        provider=provider,
+        db=db,
+    )
+    if await Config.get('oauth.enable_group_mapping'):
+        await oauth_manager.update_user_groups(
+            request=request,
+            user=user,
+            user_data=user_data,
+            default_permissions=await Config.get('user.permissions'),
+            db=db,
         )
 
     return await create_session_response(request, user, db, source='oauth')
