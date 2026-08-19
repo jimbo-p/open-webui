@@ -399,6 +399,9 @@ class ChatTable:
         """
         Clean a Chat SQLAlchemy model's title + chat JSON,
         and return True if anything changed.
+
+        The message write paths (upsert/status/delete) rely on this
+        leaving the blob clean and sanitize only the data they add.
         """
         changed = False
 
@@ -1093,9 +1096,8 @@ class ChatTable:
             if output_text:
                 message['content'] = output_text
 
-        # Sanitize message content for null characters before upserting
-        if isinstance(message.get('content'), str):
-            message['content'] = sanitize_text_for_db(message['content'])
+        message = self._clean_null_bytes(message)
+        message_id = self._clean_null_bytes(message_id)
 
         try:
             async with get_async_db_context() as session:
@@ -1110,10 +1112,9 @@ class ChatTable:
                 history = chat.get('history', {})
                 saved_message = self.upsert_message_to_history(history, message_id, message)
                 chat['history'] = history
-                clean_chat = self._clean_null_bytes(chat)
-                chat_item.chat = clean_chat
-                chat_item.title = self._clean_null_bytes(clean_chat['title']) if 'title' in clean_chat else 'New Chat'
-                chat_item.current_message_id = self.get_current_message_id(clean_chat)
+                chat_item.chat = chat  # chat is a fresh dict when the column was empty
+                chat_item.title = chat.get('title', 'New Chat')
+                chat_item.current_message_id = self.get_current_message_id(chat)
                 flag_modified(chat_item, 'chat')
 
                 if touch:
@@ -1152,22 +1153,18 @@ class ChatTable:
                 history = chat.get('history', {})
                 deleted_ids = self.delete_message_from_history(history, message_id)
                 if not deleted_ids:
-                    clean_chat = self._clean_null_bytes(chat)
-                    chat_item.chat = clean_chat
-                    chat_item.title = (
-                        self._clean_null_bytes(clean_chat['title']) if 'title' in clean_chat else 'New Chat'
-                    )
-                    chat_item.current_message_id = self.get_current_message_id(clean_chat)
+                    chat_item.chat = chat
+                    chat_item.title = chat.get('title', 'New Chat')
+                    chat_item.current_message_id = self.get_current_message_id(chat)
                     flag_modified(chat_item, 'chat')
                     await session.commit()
                     return ChatModel.model_validate(chat_item)
 
                 messages = history.get('messages') or {}
                 chat['history'] = history
-                clean_chat = self._clean_null_bytes(chat)
-                chat_item.chat = clean_chat
-                chat_item.title = self._clean_null_bytes(clean_chat['title']) if 'title' in clean_chat else 'New Chat'
-                chat_item.current_message_id = self.get_current_message_id(clean_chat)
+                chat_item.chat = chat
+                chat_item.title = chat.get('title', 'New Chat')
+                chat_item.current_message_id = self.get_current_message_id(chat)
                 flag_modified(chat_item, 'chat')
                 chat_item.updated_at = int(time.time())
                 await session.commit()
@@ -1185,6 +1182,7 @@ class ChatTable:
         self, id: str, message_id: str, status: dict
     ) -> ChatModel | None:
         try:
+            status = self._clean_null_bytes(status)
             async with get_async_db_context() as session:
                 chat_item = await self.get_chat_for_update(session, id)
                 if chat_item is None:
@@ -1201,10 +1199,9 @@ class ChatTable:
                     history['messages'][message_id]['statusHistory'] = status_history
 
                 chat['history'] = history
-                clean_chat = self._clean_null_bytes(chat)
-                chat_item.chat = clean_chat
-                chat_item.title = self._clean_null_bytes(clean_chat['title']) if 'title' in clean_chat else 'New Chat'
-                chat_item.current_message_id = self.get_current_message_id(clean_chat)
+                chat_item.chat = chat
+                chat_item.title = chat.get('title', 'New Chat')
+                chat_item.current_message_id = self.get_current_message_id(chat)
                 flag_modified(chat_item, 'chat')
                 await session.commit()
 
