@@ -1317,7 +1317,6 @@ async def compact_chat_by_id(
     return result
 
 
-
 async def get_readable_chat_by_id(id: str, user, db: AsyncSession):
     """Resolve a chat the user may read: owner, admin override, shared grant, or folder."""
     chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
