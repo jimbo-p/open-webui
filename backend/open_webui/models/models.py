@@ -237,23 +237,17 @@ class ModelsTable:
             return models
 
     async def get_models(
-        self,
-        db: AsyncSession | None = None,
-        user_id: str | None = None,
-        permission: str = 'write',
-        user_group_ids: set[str] | None = None,
+        self, writable_by_user_id: str | None = None, db: AsyncSession | None = None
     ) -> list[ModelUserResponse]:
         async with get_async_db_context(db) as db:
             stmt = select(Model).filter(Model.base_model_id != None)
 
-            if user_id is not None:
-                if user_group_ids is None:
-                    user_group_ids = {group.id for group in await Groups.get_groups_by_member_id(user_id, db=db)}
+            if writable_by_user_id:
+                user_group_ids = {
+                    group.id for group in await Groups.get_groups_by_member_id(writable_by_user_id, db=db)
+                }
                 stmt = self._has_permission(
-                    db,
-                    stmt,
-                    {'user_id': user_id, 'group_ids': user_group_ids},
-                    permission=permission,
+                    db, stmt, {'user_id': writable_by_user_id, 'group_ids': user_group_ids}, permission='write'
                 )
 
             result = await db.execute(stmt)
