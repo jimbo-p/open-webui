@@ -121,6 +121,21 @@ class RedisDict:
     def items(self):
         return [(k, JSONCodec.loads(v)) for k, v in self.redis.hgetall(self.name).items()]
 
+    def scan_batches(self):
+        """Yield lists of (key, value) pairs via incremental HSCAN; a field may repeat across batches."""
+        cursor = 0
+        while True:
+            cursor, batch = self.redis.hscan(self.name, cursor, count=200)
+            if batch:
+                yield [(k, JSONCodec.loads(v)) for k, v in batch.items()]
+            if cursor == 0:
+                break
+
+    def discard(self, *keys):
+        """Delete fields in one HDEL; no keys is a no-op (HDEL rejects an empty field list)."""
+        if keys:
+            self.redis.hdel(self.name, *keys)
+
     def set(self, mapping: dict):
         if not mapping:
             self.clear()
