@@ -102,7 +102,12 @@ from open_webui.tools.builtin import (
 )
 from open_webui.utils.access_control import has_access, has_connection_access, has_permission
 from open_webui.utils.chat_id import is_saved_chat_id
-from open_webui.utils.headers import get_custom_headers, include_user_info_headers
+from open_webui.utils.headers import (
+    bearer_auth_header,
+    get_custom_headers,
+    include_user_info_headers,
+    normalize_bearer_token,
+)
 from open_webui.utils.json_codec import JSONCodec
 from open_webui.utils.misc import is_string_allowed
 from open_webui.utils.plugin import get_tool_contents_cache, get_tools_cache, load_tool_module_by_id
@@ -117,15 +122,6 @@ from pydantic import BaseModel, Field, create_model
 from pydantic.fields import FieldInfo
 
 log = logging.getLogger(__name__)
-
-
-def normalize_bearer_token(token: Any) -> str:
-    return token.strip() if isinstance(token, str) else token or ''
-
-
-def bearer_auth_header(token: Any) -> dict[str, str]:
-    token = normalize_bearer_token(token)
-    return {'Authorization': f'Bearer {token}'} if token else {}
 
 
 async def build_tool_server_headers(
@@ -960,6 +956,7 @@ def add_terminal_display_file_inline_param(spec: dict) -> dict:
     spec['description'] = (
         f"{spec.get('description', '')} "
         "Set inline=true when the file should be shown inline in the chat message instead of opening the file viewer. "
+        "Set page for PDF, DOCX, and PPTX files when you want the preview to open at a specific 1-based page or slide. "
         "After display_file succeeds, do not display the same file again or emit Markdown for it."
     ).strip()
     parameters = spec.setdefault('parameters', {'type': 'object', 'properties': {}, 'required': []})
@@ -968,6 +965,11 @@ def add_terminal_display_file_inline_param(spec: dict) -> dict:
     properties['inline'] = {
         'type': 'boolean',
         'description': 'Show the file inline in the chat message instead of opening the file viewer.',
+    }
+    properties['page'] = {
+        'type': 'integer',
+        'minimum': 1,
+        'description': 'For PDF, DOCX, and PPTX files, open the preview at this 1-based page or slide number.',
     }
     return spec
 
@@ -1438,12 +1440,15 @@ async def get_terminal_tools(
 
         async def make_tool_function(fn_name, srv_data, hdrs, cks):
             async def tool_function(**kwargs):
+                params = dict(kwargs)
+                if fn_name == 'display_file':
+                    params.pop('page', None)
                 return await execute_tool_server(
                     url=srv_data['url'],
                     headers=hdrs,
                     cookies=cks,
                     name=fn_name,
-                    params=kwargs,
+                    params=params,
                     server_data=srv_data,
                 )
 

@@ -4,6 +4,7 @@ from typing import Iterator, List, Literal, Union
 import requests
 from langchain_core.document_loaders import BaseLoader
 from langchain_core.documents import Document
+from open_webui.env import TAVILY_API_BASE_URL
 
 log = logging.getLogger(__name__)
 
@@ -53,7 +54,7 @@ class TavilyLoader(BaseLoader):
         self.urls = urls if isinstance(urls, list) else [urls]
         self.extract_depth = extract_depth
         self.continue_on_failure = continue_on_failure
-        self.api_url = f'{(api_base_url or DEFAULT_TAVILY_API_BASE_URL).rstrip("/")}/extract'
+        self.api_url = f'{(api_base_url or TAVILY_API_BASE_URL).rstrip("/")}/extract'
 
     def lazy_load(self) -> Iterator[Document]:
         """Extract and yield documents from the URLs using Tavily Extract API."""

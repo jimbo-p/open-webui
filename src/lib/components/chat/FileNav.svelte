@@ -37,6 +37,7 @@
 	} from '$lib/apis/terminal';
 	import { isCodeFile } from '$lib/utils/codeHighlight';
 	import { isSavedChatId, isTemporaryChatId } from '$lib/utils/chatId';
+	import { normalizeDocumentTargetPage } from '$lib/utils/documentPreview';
 
 	import Spinner from '../common/Spinner.svelte';
 	import Tooltip from '../common/Tooltip.svelte';
@@ -302,6 +303,7 @@
 	let fileLoading = false;
 	let filePreviewRef: FilePreview;
 	let fileSearchTarget: FileSearchTarget | null = null;
+	let documentTargetPage: number | null = null;
 
 	// ── Office preview state ────────────────────────────────────────────
 	let fileOfficeHtml: string | null = null;
@@ -627,35 +629,14 @@
 		return isInsideFileRoot(path) ? asDirectoryPath(path) : fileRoot.path;
 	};
 
-	const rootFromCwd = (cwd: TerminalCwd | null, pathHint?: string) => {
-		const cwdPath = cwd?.cwd ? asDirectoryPath(cwd.cwd) : null;
-		const homePath = cwd?.home ? asDirectoryPath(cwd.home) : null;
-		const hintPath = pathHint ? asDirectoryPath(pathHint) : null;
+	const rootFromCwd = (cwd: TerminalCwd | null) => {
 		const rootPath = cwd?.root?.path ? asDirectoryPath(cwd.root.path) : null;
-
-		if (rootPath && rootPath !== '/') return cwd?.root;
-
-		const knownRoot = fileRoot ?? savedFileRoot;
-		if (
-			knownRoot?.path &&
-			hintPath &&
-			hintPath !== '/' &&
-			(hintPath === knownRoot.path || hintPath.startsWith(knownRoot.path))
-		) {
-			return knownRoot;
-		}
-
-		const pathForHome = hintPath && hintPath !== '/' ? hintPath : cwdPath;
-		if (homePath && pathForHome && (pathForHome === homePath || pathForHome.startsWith(homePath))) {
-			return { path: homePath, label: 'Home' };
-		}
-
-		return undefined;
+		return rootPath && rootPath !== '/' ? cwd?.root : undefined;
 	};
 
-	const applyCwd = (cwd: TerminalCwd | null, pathHint?: string) => {
+	const applyCwd = (cwd: TerminalCwd | null) => {
 		const cwdPath = cwd?.cwd ? asDirectoryPath(cwd.cwd) : null;
-		setFileRoot(rootFromCwd(cwd, pathHint));
+		setFileRoot(rootFromCwd(cwd));
 		const path = cwdPath ?? fileRoot?.path ?? '/';
 		return clampToFileRoot(path);
 	};
@@ -691,6 +672,7 @@
 	// ── File preview management ──────────────────────────────────────────
 	const clearFilePreview = () => {
 		fileSearchTarget = null;
+		documentTargetPage = null;
 		fileContent = null;
 		if (fileImageUrl) {
 			URL.revokeObjectURL(fileImageUrl);
@@ -810,7 +792,7 @@
 		}
 	};
 
-	const openEntry = async (entry: FileEntry) => {
+	const openEntry = async (entry: FileEntry, options: { page?: unknown } = {}) => {
 		const fullPath =
 			'fullPath' in entry ? (entry as BrowserRow).fullPath : entryPath(currentPath, entry);
 		const parentPath = 'parentPath' in entry ? (entry as BrowserRow).parentPath : currentPath;
@@ -832,6 +814,7 @@
 		selectedFile = filePath;
 		fileLoading = true;
 		clearFilePreview();
+		documentTargetPage = normalizeDocumentTargetPage(options.page);
 
 		if (isImage(filePath)) {
 			const result = await downloadFileBlob(
@@ -1317,10 +1300,12 @@
 
 		let handledDisplayFile = false;
 
-		const unsubFileNav = showFileNavPath.subscribe(async (filePath) => {
-			if (!filePath || !selectedTerminal) return;
+		const unsubFileNav = showFileNavPath.subscribe(async (request) => {
+			if (!request || !selectedTerminal) return;
 			handledDisplayFile = true;
 			showFileNavPath.set(null);
+			let filePath = typeof request === 'string' ? request : request.path;
+			const targetPage = typeof request === 'string' ? null : request.page;
 			filePath = normalizePath(filePath);
 			if (!isInsideFileRoot(filePath)) {
 				await loadDir(fileRoot?.path ?? '/');
@@ -1337,10 +1322,10 @@
 
 			const entry = entries.find((e) => e.name === fileName);
 			if (entry) {
-				await openEntry(entry);
+				await openEntry(entry, { page: targetPage });
 			} else {
 				// File may not be in listing; open it directly
-				await openEntry({ name: fileName, type: 'file', size: 0 });
+				await openEntry({ name: fileName, type: 'file', size: 0 }, { page: targetPage });
 			}
 		});
 
@@ -1379,7 +1364,7 @@
 
 				const serverCwd = await getCwd(terminal.url, terminal.key, chatId ?? undefined);
 				const useServerPath = !!chatId || savedPath === '/';
-				const serverPath = applyCwd(serverCwd, useServerPath ? undefined : savedPath);
+				const serverPath = applyCwd(serverCwd);
 				if (useServerPath) {
 					// Fetch session-specific cwd from the server (or global default for new chats)
 					savedPath = serverPath;
@@ -1741,6 +1726,7 @@
 					{fileContent}
 					{fileOfficeHtml}
 					{fileOfficeSlides}
+					targetPage={documentTargetPage}
 					{excelSheetNames}
 					{selectedExcelSheet}
 					searchTarget={fileSearchTarget}
@@ -1904,7 +1890,7 @@
 					</div>
 				{/if}
 
-					{#if !isSearching && !loading && !error && !uploading && !($selectedTerminalId && $terminalServers === null)}
+				{#if !isSearching && !loading && !error && !uploading && !($selectedTerminalId && $terminalServers === null)}
 					{#if creatingFolder}
 						<div class="flex h-7 items-center gap-2 px-2">
 							<FileTypeIcon name={newFolderName} type="directory" />

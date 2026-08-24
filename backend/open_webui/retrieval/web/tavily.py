@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 import requests
+from open_webui.env import TAVILY_API_BASE_URL
 from open_webui.retrieval.loaders.tavily import DEFAULT_TAVILY_API_BASE_URL
 from open_webui.retrieval.web.main import SearchResult, get_filtered_results
 
@@ -28,7 +29,7 @@ def search_tavily(
     Returns:
         A list of SearchResult objects.
     """
-    url = f'{(api_base_url or DEFAULT_TAVILY_API_BASE_URL).rstrip("/")}/search'
+    url = f'{(api_base_url or TAVILY_API_BASE_URL).rstrip("/")}/search'
     headers = {
         'Content-Type': 'application/json',
         'Authorization': f'Bearer {api_key}',
