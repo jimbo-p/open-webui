@@ -112,14 +112,14 @@ async def get_users(
     filter = {}
     if query:
         filter['query'] = query
-    if order_by:
-        filter['order_by'] = order_by
-    if direction:
-        filter['direction'] = direction
 
-    filter['direction'] = direction
-
-    result = await Users.get_users(filter=filter, skip=skip, limit=limit, db=db)
+    result = await Users.get_users(
+        filter=filter,
+        sort={'order_by': order_by, 'direction': direction},
+        skip=skip,
+        limit=limit,
+        db=db,
+    )
 
     users = result['users']
     total = result['total']
@@ -167,12 +167,14 @@ async def search_users(
     filter = {}
     if query:
         filter['query'] = query
-    if order_by:
-        filter['order_by'] = order_by
-    if direction:
-        filter['direction'] = direction
 
-    return await Users.get_users(filter=filter, skip=skip, limit=limit, db=db)
+    return await Users.get_users(
+        filter=filter,
+        sort={'order_by': order_by, 'direction': direction},
+        skip=skip,
+        limit=limit,
+        db=db,
+    )
 
 
 ############################
@@ -513,7 +515,7 @@ async def update_user_settings_by_session_user(
     if (
         user.role != 'admin'
         and ui_settings is not None
-        and 'toolServers' in ui_settings.keys()
+        and 'toolServers' in ui_settings
         and not await has_permission(
             user.id,
             'features.direct_tool_servers',

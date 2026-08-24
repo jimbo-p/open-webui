@@ -175,6 +175,7 @@ class ToolsTable:
         db: AsyncSession | None = None,
         user_id: str | None = None,
         user_group_ids: set[str] | None = None,
+        permission: str = 'read',
     ) -> list[ToolUserModel]:
         """List tools, scoped to what user_id may read when given."""
         async with get_async_db_context(db) as db:
@@ -193,7 +194,7 @@ class ToolsTable:
                     DocumentModel=Tool,
                     filter={'user_id': user_id, 'group_ids': user_group_ids},
                     resource_type='tool',
-                    permission='read',
+                    permission=permission,
                 )
 
             result = await db.execute(stmt)
@@ -224,6 +225,23 @@ class ToolsTable:
                     )
                 )
             return tools
+
+    async def get_tools_by_user_id(
+        self,
+        user_id: str,
+        permission: str = 'write',
+        defer_content: bool = False,
+        db: AsyncSession | None = None,
+    ) -> list[ToolUserModel]:
+        user_groups = await Groups.get_groups_by_member_id(user_id, db=db)
+        user_group_ids = {group.id for group in user_groups}
+        return await self.get_tools(
+            defer_content=defer_content,
+            db=db,
+            user_id=user_id,
+            user_group_ids=user_group_ids,
+            permission=permission,
+        )
 
     async def get_tool_valves_by_id(self, id: str, db: AsyncSession | None = None) -> dict | None:
         try:

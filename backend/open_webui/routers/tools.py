@@ -71,8 +71,12 @@ async def get_tools(
     db: AsyncSession = Depends(get_async_session),
 ):
     tools = []
-    is_bypass_admin = user.role == 'admin' and BYPASS_ADMIN_ACCESS_CONTROL
-    user_group_ids = {group.id for group in await Groups.get_groups_by_member_id(user.id, db=db)}
+    bypass_access_control = user.role == 'admin' and BYPASS_ADMIN_ACCESS_CONTROL
+    user_group_ids = (
+        set()
+        if bypass_access_control
+        else {group.id for group in await Groups.get_groups_by_member_id(user.id, db=db)}
+    )
 
     # Local Tools
     if ENABLE_PLUGINS:
@@ -80,7 +84,7 @@ async def get_tools(
         for tool in await Tools.get_tools(
             defer_content=True,
             db=db,
-            user_id=None if is_bypass_admin else user.id,
+            user_id=None if bypass_access_control else user.id,
             user_group_ids=user_group_ids,
         ):
             tool_module = tools_cache.get(tool.id)
@@ -173,13 +177,19 @@ async def get_tools(
                 )
             )
 
-    if not is_bypass_admin:
+    if not bypass_access_control:
         # Local tools arrive access-filtered from the query; server entries are config-driven.
         tools = [
             tool
             for tool in tools
-            if not tool.id.startswith('server:')
-            or await has_access(user.id, 'read', server_access_grants.get(tool.id, []), user_group_ids, db=db)
+            if not str(tool.id).startswith('server:')
+            or await has_access(
+                user.id,
+                'read',
+                server_access_grants.get(str(tool.id), []),
+                user_group_ids,
+                db=db,
+            )
         ]
 
     if query:
@@ -199,19 +209,23 @@ async def get_tool_list(user=Depends(get_verified_user), db: AsyncSession = Depe
     if not ENABLE_PLUGINS:
         return []
 
-    is_bypass_admin = user.role == 'admin' and BYPASS_ADMIN_ACCESS_CONTROL
-    user_group_ids = {group.id for group in await Groups.get_groups_by_member_id(user.id, db=db)}
+    bypass_access_control = user.role == 'admin' and BYPASS_ADMIN_ACCESS_CONTROL
+    user_group_ids = (
+        set()
+        if bypass_access_control
+        else {group.id for group in await Groups.get_groups_by_member_id(user.id, db=db)}
+    )
     tools = await Tools.get_tools(
         defer_content=True,
         db=db,
-        user_id=None if is_bypass_admin else user.id,
+        user_id=None if bypass_access_control else user.id,
         user_group_ids=user_group_ids,
     )
 
     result = []
     for tool in tools:
         has_write = (
-            is_bypass_admin
+            bypass_access_control
             or user.id == tool.user_id
             or any(
                 g.permission == 'write'
@@ -326,9 +340,10 @@ async def export_tools(
             detail=ERROR_MESSAGES.UNAUTHORIZED,
         )
 
+    bypass_access_control = user.role == 'admin' and BYPASS_ADMIN_ACCESS_CONTROL
     return await Tools.get_tools(
         db=db,
-        user_id=None if (user.role == 'admin' and BYPASS_ADMIN_ACCESS_CONTROL) else user.id,
+        user_id=None if bypass_access_control else user.id,
     )
 
 

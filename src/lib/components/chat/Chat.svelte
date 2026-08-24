@@ -61,7 +61,8 @@
 		processDetails,
 		removeAllDetails,
 		getCodeBlockContents,
-		displayFileHandler
+		displayFileHandler,
+		getUsageTokenCount
 	} from '$lib/utils';
 	import { AudioQueue } from '$lib/utils/audio';
 	import { createTemporaryChatId, isTemporaryChatId } from '$lib/utils/chatId';
@@ -287,13 +288,10 @@
 
 		for (let idx = activeMessages.length - 1; idx >= 0; idx -= 1) {
 			const usage = activeMessages[idx]?.usage ?? activeMessages[idx]?.info?.usage;
-			const inputTokens = usage?.input_tokens ?? usage?.prompt_tokens;
-			if (inputTokens) {
+			const usageTokens = getUsageTokenCount(usage);
+			if (usageTokens) {
 				hasUsageCheckpoint = true;
-				estimatedTokens =
-					Number(inputTokens || 0) +
-					Number(usage.output_tokens ?? usage.completion_tokens ?? 0) +
-					estimateMessagesTokens(activeMessages.slice(idx + 1));
+				estimatedTokens = usageTokens + estimateMessagesTokens(activeMessages.slice(idx + 1));
 				break;
 			}
 		}
@@ -1898,29 +1896,38 @@
 			return;
 		}
 
+		const ttsSplitOn = $config?.audio?.tts?.split_on ?? 'punctuation';
 		const messageContentParts = getMessageContentParts(
 			getOutputText(message?.output) || removeAllDetails(message?.content ?? ''),
-			$config?.audio?.tts?.split_on ?? 'punctuation'
+			ttsSplitOn
 		);
-		if (!final) {
-			messageContentParts.pop();
-		}
 
-		let n = message.ttsSent ?? 0;
-		for (; n < messageContentParts.length; n++) {
-			const part = messageContentParts[n];
-			if (!part) continue;
-			if (!final && (part.split(/\s+/).length < 4 || part.length < 50)) break;
+		const sentContentPartCount = message.ttsSentContentPartCount ?? 0;
+		const nextContentParts = (final ? messageContentParts : messageContentParts.slice(0, -1)).slice(
+			sentContentPartCount
+		);
+		const pendingContentPartIndex = nextContentParts.findIndex(
+			(content) =>
+				!final &&
+				ttsSplitOn === 'punctuation' &&
+				(content.split(/\s+/).length < 4 || content.length < 50)
+		);
+		const dispatchContentParts =
+			pendingContentPartIndex === -1
+				? nextContentParts
+				: nextContentParts.slice(0, pendingContentPartIndex);
+
+		dispatchContentParts.forEach((content) => {
 			eventTarget.dispatchEvent(
 				new CustomEvent('chat', {
 					detail: {
 						id: message.id,
-						content: part
+						content
 					}
 				})
 			);
-		}
-		message.ttsSent = n;
+		});
+		message.ttsSentContentPartCount = sentContentPartCount + dispatchContentParts.length;
 	};
 
 	const getContents = () => {
@@ -3220,6 +3227,9 @@
 			: atSelectedModel !== undefined
 				? [atSelectedModel.id]
 				: selectedModels;
+		if (!modelId && history.messages[parentId]) {
+			history.messages[parentId].models = [...selectedModelIds];
+		}
 
 		// Create response messages for each selected model
 		// Build message_ids list: [{model_id, message_id, modelIdx}, ...]

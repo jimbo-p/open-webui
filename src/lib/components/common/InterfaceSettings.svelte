@@ -37,6 +37,7 @@
 	let scrollOnBranchChange = true;
 	let scrollOnResponseGeneration = true;
 	let showFilesOnTerminalSelect = true;
+	let terminalFileDisplay: 'sidebar' | 'inline' = 'sidebar';
 	let userLocation = false;
 
 	// Interface
@@ -104,8 +105,10 @@
 
 	let webSearch: string | null = null;
 
+	let iframeSandboxAllowScripts = true;
 	let iframeSandboxAllowSameOrigin = false;
-	let iframeSandboxAllowForms = false;
+	let iframeSandboxAllowForms = true;
+	let iframeSandboxAllowDownloads = true;
 
 	let showManageFloatingActionButtonsModal = false;
 	let showManageImageCompressionModal = false;
@@ -296,14 +299,17 @@
 		scrollOnBranchChange = currentSettings?.scrollOnBranchChange ?? true;
 		scrollOnResponseGeneration = currentSettings?.scrollOnResponseGeneration ?? true;
 		showFilesOnTerminalSelect = currentSettings?.showFilesOnTerminalSelect ?? true;
+		terminalFileDisplay = currentSettings?.terminalFileDisplay === 'inline' ? 'inline' : 'sidebar';
 
 		temporaryChatByDefault = currentSettings?.temporaryChatByDefault ?? false;
 		chatDirection = currentSettings?.chatDirection ?? 'auto';
 		userLocation = currentSettings?.userLocation ?? false;
 		showChatTitleInTab = currentSettings?.showChatTitleInTab ?? true;
 
+		iframeSandboxAllowScripts = currentSettings?.iframeSandboxAllowScripts ?? true;
 		iframeSandboxAllowSameOrigin = currentSettings?.iframeSandboxAllowSameOrigin ?? false;
-		iframeSandboxAllowForms = currentSettings?.iframeSandboxAllowForms ?? false;
+		iframeSandboxAllowForms = currentSettings?.iframeSandboxAllowForms ?? true;
+		iframeSandboxAllowDownloads = currentSettings?.iframeSandboxAllowDownloads ?? true;
 
 		stylizedPdfExport = currentSettings?.stylizedPdfExport ?? true;
 
@@ -1255,6 +1261,31 @@
 
 			<div>
 				<div class={settingRowClass}>
+					<div id="terminal-file-display-label" class={settingLabelClass}>
+						{$i18n.t('Terminal File Display')}
+					</div>
+
+					<button
+						aria-labelledby="terminal-file-display-label terminal-file-display-state"
+						class={actionButtonClass}
+						on:click={() => {
+							terminalFileDisplay = terminalFileDisplay === 'inline' ? 'sidebar' : 'inline';
+							saveSettings({ terminalFileDisplay });
+						}}
+						type="button"
+					>
+						<span id="terminal-file-display-state">
+							{terminalFileDisplay === 'inline' ? $i18n.t('Inline') : $i18n.t('Sidebar')}
+						</span>
+					</button>
+				</div>
+				<p class={settingDescriptionClass}>
+					{$i18n.t('Choose where terminal display_file results appear by default.')}
+				</p>
+			</div>
+
+			<div>
+				<div class={settingRowClass}>
 					<div id="show-files-on-terminal-select-label" class={settingLabelClass}>
 						{$i18n.t('Show Files on Terminal Select')}
 					</div>
@@ -1533,6 +1564,29 @@
 
 			<div>
 				<div class={settingRowClass}>
+					<div id="iframe-sandbox-allow-scripts-label" class={settingLabelClass}>
+						{$i18n.t('iframe Sandbox Allow Scripts')}
+					</div>
+
+					<div class={settingControlClass}>
+						<Switch
+							ariaLabelledbyId="iframe-sandbox-allow-scripts-label"
+							tooltip={true}
+							bind:state={iframeSandboxAllowScripts}
+							inherited={isDefaultSetting('iframeSandboxAllowScripts')}
+							on:change={() => {
+								saveSettings({ iframeSandboxAllowScripts });
+							}}
+						/>
+					</div>
+				</div>
+				<p class={settingDescriptionClass}>
+					{$i18n.t('Allow scripts inside sandboxed iframes.')}
+				</p>
+			</div>
+
+			<div>
+				<div class={settingRowClass}>
 					<div id="iframe-sandbox-allow-same-origin-label" class={settingLabelClass}>
 						{$i18n.t('iframe Sandbox Allow Same Origin')}
 					</div>
@@ -1574,6 +1628,29 @@
 				</div>
 				<p class={settingDescriptionClass}>
 					{$i18n.t('Allow forms inside sandboxed artifact iframes.')}
+				</p>
+			</div>
+
+			<div>
+				<div class={settingRowClass}>
+					<div id="iframe-sandbox-allow-downloads-label" class={settingLabelClass}>
+						{$i18n.t('iframe Sandbox Allow Downloads')}
+					</div>
+
+					<div class={settingControlClass}>
+						<Switch
+							ariaLabelledbyId="iframe-sandbox-allow-downloads-label"
+							tooltip={true}
+							bind:state={iframeSandboxAllowDownloads}
+							inherited={isDefaultSetting('iframeSandboxAllowDownloads')}
+							on:change={() => {
+								saveSettings({ iframeSandboxAllowDownloads });
+							}}
+						/>
+					</div>
+				</div>
+				<p class={settingDescriptionClass}>
+					{$i18n.t('Allow downloads inside sandboxed iframes.')}
 				</p>
 			</div>
 

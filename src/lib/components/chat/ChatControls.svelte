@@ -67,12 +67,6 @@
 	const chatContextAvailable = (terminal: any) => chatContext(terminal) !== false;
 	const chatContextNeedsSavedChat = (terminal: any) =>
 		chatContext(terminal)?.context_id === 'chat_id';
-	function showFilesOnTerminalSelect(largeScreen: boolean) {
-		activeTab = 'files';
-		if (largeScreen) {
-			showControls.set($settings?.showFilesOnTerminalSelect ?? true);
-		}
-	}
 	$: selectedSystemTerminal = ($terminalServers ?? []).find(
 		(t) => t.id && t.id === $selectedTerminalId
 	);
@@ -110,9 +104,9 @@
 		showControls.set(true);
 	}
 
-	// Auto-open Files tab when a terminal is selected (suppress panel open when full-screen)
+	// Keep Files selected when a terminal is active; opening the panel is handled by selection UI.
 	$: if ($selectedTerminalId && terminalFilesAvailable) {
-		showFilesOnTerminalSelect(largeScreen);
+		activeTab = 'files';
 	}
 
 	// Clear selected direct terminal if user lost permission
@@ -316,7 +310,9 @@
 		open={$showControls}
 		bind:width={controlsWidth}
 		minWidth={350}
-		maxWidth={640}
+		minSiblingWidth={360}
+		closeOnDragBelowMinWidth
+		onClose={() => showControls.set(false)}
 		storageKey="chatControlsSize"
 		className="h-full z-10 bg-white dark:bg-gray-900"
 	>

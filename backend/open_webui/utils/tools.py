@@ -952,6 +952,26 @@ def clean_openai_tool_schema(spec: dict) -> dict:
     return cleaned_spec
 
 
+def add_terminal_display_file_inline_param(spec: dict) -> dict:
+    spec = copy.deepcopy(spec)
+    if spec.get('name') != 'display_file':
+        return spec
+
+    spec['description'] = (
+        f"{spec.get('description', '')} "
+        "Set inline=true when the file should be shown inline in the chat message instead of opening the file viewer. "
+        "After display_file succeeds, do not display the same file again or emit Markdown for it."
+    ).strip()
+    parameters = spec.setdefault('parameters', {'type': 'object', 'properties': {}, 'required': []})
+    parameters.setdefault('type', 'object')
+    properties = parameters.setdefault('properties', {})
+    properties['inline'] = {
+        'type': 'boolean',
+        'description': 'Show the file inline in the chat message instead of opening the file viewer.',
+    }
+    return spec
+
+
 @cache
 def get_builtin_function_introspection(func: Callable):
     try:
@@ -1409,7 +1429,7 @@ async def get_terminal_tools(
     tools_dict = {}
     for spec in specs:
         function_name = spec['name']
-        tool_spec = clean_openai_tool_schema(spec)
+        tool_spec = clean_openai_tool_schema(add_terminal_display_file_inline_param(spec))
 
         if function_name == 'run_command' and terminal_cwd:
             tool_spec['description'] = (
@@ -1472,6 +1492,10 @@ async def get_tool_server_data(url: str, headers: dict | None) -> dict[str, Any]
                         # Fall back to YAML for non-.yml URLs that aren't valid JSON
                         res = yaml.safe_load(text_content)
 
+    except (aiohttp.ClientConnectionError, TimeoutError) as err:
+        error = str(err) or type(err).__name__
+        log.error(f'Could not fetch tool server spec from {url}: {error}')
+        raise Exception(error)
     except Exception as err:
         log.exception(f'Could not fetch tool server spec from {url}')
         if isinstance(err, dict) and 'detail' in err:
@@ -1556,7 +1580,10 @@ async def get_tool_servers_data(servers: list[dict[str, Any]]) -> list[dict[str,
         response = {
             'openapi': response,
             'info': response.get('info', {}),
-            'specs': convert_openapi_to_tool_payload(response),
+            'specs': [
+                add_terminal_display_file_inline_param(spec)
+                for spec in convert_openapi_to_tool_payload(response)
+            ],
         }
 
         openapi_data = response.get('openapi', {})

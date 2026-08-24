@@ -35,6 +35,7 @@
 		user as _user,
 		showControls,
 		showSettings,
+		showFileNavDir,
 		selectedTerminalId,
 		TTSWorker,
 		temporaryChatEnabled
@@ -51,6 +52,7 @@
 		getCurrentDateTime,
 		getFormattedDate,
 		getFormattedTime,
+		getUsageTokenCount,
 		getUserPosition,
 		getUserTimezone,
 		getWeekday
@@ -499,13 +501,10 @@
 
 		for (let idx = activeMessages.length - 1; idx >= 0; idx -= 1) {
 			const usage = activeMessages[idx]?.usage ?? activeMessages[idx]?.info?.usage;
-			const inputTokens = usage?.input_tokens ?? usage?.prompt_tokens;
-			if (inputTokens) {
+			const usageTokens = getUsageTokenCount(usage);
+			if (usageTokens) {
 				hasUsageCheckpoint = true;
-				estimatedTokens =
-					Number(inputTokens || 0) +
-					Number(usage.output_tokens ?? usage.completion_tokens ?? 0) +
-					estimateMessagesTokens(activeMessages.slice(idx + 1));
+				estimatedTokens = usageTokens + estimateMessagesTokens(activeMessages.slice(idx + 1));
 				break;
 			}
 		}
@@ -893,10 +892,7 @@
 
 		return (
 			(settingsValue?.terminalServers ?? []).find(
-				(t: any) =>
-					t.url === selectedId &&
-					t.enabled &&
-					t.config?.chat_uploads === 'filesystem'
+				(t: any) => t.url === selectedId && t.enabled && t.config?.chat_uploads === 'filesystem'
 			) ?? null
 		);
 	};
@@ -942,11 +938,13 @@
 		if (filesystemUploadTerminal) {
 			try {
 				const cwd =
-					(await getCwd(
-						filesystemUploadTerminal.url,
-						filesystemUploadTerminal.key,
-						chatId || undefined
-					))?.cwd || '/';
+					(
+						await getCwd(
+							filesystemUploadTerminal.url,
+							filesystemUploadTerminal.key,
+							chatId || undefined
+						)
+					)?.cwd || '/';
 				const uploadedFile = await uploadToTerminal(
 					filesystemUploadTerminal.url,
 					filesystemUploadTerminal.key,
@@ -956,7 +954,7 @@
 				);
 
 				if (uploadedFile) {
-					fileItem.type = 'terminal_file';
+					fileItem.type = 'filesystem';
 					fileItem.status = 'uploaded';
 					fileItem.id = uploadedFile.path;
 					fileItem.path = uploadedFile.path;
@@ -964,6 +962,7 @@
 					fileItem.size = uploadedFile.size ?? file.size;
 					fileItem.file = uploadedFile;
 					files = files;
+					showFileNavDir.set(uploadedFile.path);
 				} else {
 					fileItem.status = 'error';
 					fileItem.error = $i18n.t('Failed to upload file.');
@@ -1373,6 +1372,26 @@
 								...files,
 								{
 									...data,
+									status: 'processed'
+								}
+							];
+						} else if (type === 'filesystem') {
+							const path = data.path ?? data.url ?? data.id;
+							if (
+								!path ||
+								files.find((f) => f.type === 'filesystem' && (f.path ?? f.url ?? f.id) === path)
+							) {
+								return;
+							}
+							files = [
+								...files,
+								{
+									type: 'filesystem',
+									id: path,
+									path,
+									url: path,
+									name: data.name,
+									size: data.size,
 									status: 'processed'
 								}
 							];
@@ -2159,7 +2178,7 @@
 							</div>
 
 							<div class=" flex justify-between mt-0.5 mb-2 mx-0.5 max-w-full" dir="ltr">
-								<div class="ml-1 self-end flex items-center flex-1 min-w-0">
+								<div class="ml-1 self-end flex items-center shrink-0">
 									<InputMenu
 										bind:files
 										selectedModels={selectedModelIds}
@@ -2494,7 +2513,7 @@
 									</div>
 								</div>
 
-								<div class="self-end flex space-x-1 mr-1 shrink-0 gap-[0.03125rem]">
+								<div class="self-end flex space-x-1 mr-1 min-w-0 gap-[0.03125rem]">
 									<div class="flex min-w-0 max-w-[10rem] items-center sm:max-w-[13rem]">
 										<ModelSelector
 											bind:this={modelSelector}
