@@ -578,6 +578,10 @@
 							items={tags.map((tag) => {
 								return { value: tag, label: tag };
 							})}
+							onChange={async () => {
+								page = 1;
+								await tick();
+							}}
 						/>
 					{/if}
 				</div>

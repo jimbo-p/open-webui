@@ -498,6 +498,10 @@
 							bind:value={selectedTag}
 							align="end"
 							items={tags.map((tag) => ({ value: tag, label: tag }))}
+							onChange={async () => {
+								page = 1;
+								await tick();
+							}}
 						/>
 					{/if}
 				</div>
