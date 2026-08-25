@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 
 import pycrdt as Y
@@ -62,16 +63,35 @@ class RedisLock:
 
 
 class RedisDict:
+    # Contents and fingerprint must be written together, or a stale fingerprint suppresses the repair.
+    _SET_SCRIPT = """
+    local wanted = {}
+    for i = 2, #ARGV, 2 do
+        wanted[ARGV[i]] = true
+        redis.call('hset', KEYS[1], ARGV[i], ARGV[i + 1])
+    end
+    for _, field in ipairs(redis.call('hkeys', KEYS[1])) do
+        if not wanted[field] then
+            redis.call('hdel', KEYS[1], field)
+        end
+    end
+    -- Expiring forces a rewrite every 5 min, repairing a hash damaged outside this script.
+    redis.call('set', KEYS[2], ARGV[1], 'EX', 300)
+    """
+
     def __init__(
         self,
         name,
         redis_url,
         redis_sentinels=[],
         redis_cluster=False,
-        cache_set_signature=False,
+        cache_set_signature=True,
     ):
         self.name = name
-        self._signature_name = f'{name}:signature' if cache_set_signature else None
+        # Both keys must share a cluster slot: reuse the name's hash tag, or wrap it to make one.
+        tag_open = name.find('{')
+        is_tagged = tag_open != -1 and name.find('}', tag_open + 1) > tag_open + 1
+        self._signature_name = f'{name}:signature' if is_tagged else f'{{{name}}}:signature'
         self.redis = get_redis_connection(
             redis_url,
             redis_sentinels,
@@ -127,7 +147,10 @@ class RedisDict:
         """Delete fields in one HDEL; no keys is a no-op (HDEL rejects an empty field list)."""
         if keys:
             self.redis.hdel(self.name, *keys)
-            self._last_signature = None
+            if self._signature_name:
+                self.redis.delete(self._signature_name)
+
+    discard = delete_many
 
     def set(self, mapping: dict):
         if not mapping:
@@ -144,24 +167,14 @@ class RedisDict:
             digest.update(b'\0')
         signature = digest.hexdigest()
 
-        if self._signature_name and self.redis.get(self._signature_name) == signature:
+        # Fast path: skip sending the payload when the hash already holds it; a lost race self-heals.
+        if self.redis.get(self._signature_name) == signature and self.redis.exists(self.name):
             return
 
-        # Fetch existing keys before writing so we know which ones to remove.
-        # HKEYS is cheap — it transfers only short key strings, not large JSON values.
-        existing_keys = set(self.redis.hkeys(self.name))
-        new_keys = set(mapping.keys())
-        keys_to_remove = existing_keys - new_keys
-
-        # HSET first (add/update all new values), then HDEL (remove stale keys).
-        # We never DELETE the whole hash — this eliminates the race window
-        # where concurrent readers would see an empty models dict.
-        self.redis.hset(self.name, mapping=serialized)
-        if keys_to_remove:
-            self.redis.hdel(self.name, *keys_to_remove)
-
-        if self._signature_name:
-            self.redis.set(self._signature_name, signature)
+        args = [signature]
+        for field, value in serialized.items():
+            args += [field, value]
+        self.redis.eval(self._SET_SCRIPT, 2, self.name, self._signature_name, *args)
 
     def get(self, key, default=None):
         try:
@@ -170,11 +183,7 @@ class RedisDict:
             return default
 
     def clear(self):
-        if self._signature_name:
-            self.redis.delete(self.name)
-            self.redis.delete(self._signature_name)
-        else:
-            self.redis.delete(self.name)
+        self.redis.delete(self.name, self._signature_name)
 
     def update(self, other=None, **kwargs):
         if other is not None:
@@ -187,6 +196,52 @@ class RedisDict:
         if key not in self:
             self[key] = default
         return self[key]
+
+
+def _append_prosemirror_nodes(parent, nodes) -> None:
+    # Children are appended before being written to: pycrdt only accepts writes once integrated.
+    text_run = None  # a run of text nodes shares one XmlText, as y-prosemirror lays them out
+
+    for node in nodes or []:
+        if not isinstance(node, dict) or not isinstance(node.get('type'), str):
+            continue
+
+        if node['type'] == 'text':
+            if not isinstance(node.get('text'), str) or not node['text']:
+                continue
+            if text_run is None:
+                text_run = Y.XmlText()
+                parent.children.append(text_run)
+            marks = {
+                mark['type']: mark.get('attrs') or {}
+                for mark in node.get('marks') or []
+                if isinstance(mark, dict) and mark.get('type')
+            }
+            text_run.insert(len(text_run), node['text'], marks)
+            continue
+
+        text_run = None
+        element = Y.XmlElement(node['type'])
+        parent.children.append(element)
+        for key, value in (node.get('attrs') or {}).items():
+            if value is not None:
+                element.attributes[key] = value
+        _append_prosemirror_nodes(element, node.get('content'))
+
+
+def build_prosemirror_update(content_json) -> bytes | None:
+    """Encode a ProseMirror document as a Yjs update in the shape y-prosemirror reads back."""
+    if not isinstance(content_json, dict) or content_json.get('type') != 'doc' or not content_json.get('content'):
+        return None
+
+    # A content-derived client id makes a concurrent seed of the same content a no-op.
+    canonical = json.dumps(content_json, sort_keys=True, separators=(',', ':'))
+    content_digest = hashlib.sha256(canonical.encode()).digest()
+    doc = Y.Doc(client_id=int.from_bytes(content_digest[:4], 'big'))
+    fragment = Y.XmlFragment()
+    doc['prosemirror'] = fragment
+    _append_prosemirror_nodes(fragment, content_json['content'])
+    return doc.get_update()
 
 
 class YdocManager:
