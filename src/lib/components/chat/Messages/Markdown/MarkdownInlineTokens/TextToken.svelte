@@ -5,9 +5,10 @@
 	export let done = true;
 
 	$: raw = token?.raw ?? '';
+	$: fade = !done && ($settings?.chatFadeStreamingText ?? true);
 </script>
 
-{#if done || !($settings?.chatFadeStreamingText ?? true)}
+{#if !fade}
 	{raw}
 {:else}
 	{#each raw.split(' ') as text}

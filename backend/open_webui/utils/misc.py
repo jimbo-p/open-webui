@@ -40,6 +40,19 @@ def merge_model_params(base: dict, override: dict) -> dict:
     return params
 
 
+def normalize_tags(tags) -> list[dict]:
+    # Unvalidated config and API payloads hold tags as plain strings or malformed dicts
+    if not isinstance(tags, list):
+        return []
+
+    normalized = []
+    for tag in tags:
+        name = tag.get('name') if isinstance(tag, dict) else tag
+        if isinstance(name, str) and name.strip():
+            normalized.append({'name': name.strip()})
+    return normalized
+
+
 def get_response_error_detail(response: object) -> str:
     status_code = getattr(response, 'status_code', None)
     fallback = f'Provider returned HTTP {status_code}' if status_code else 'Provider returned an error'

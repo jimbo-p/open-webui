@@ -1362,8 +1362,6 @@ def convert_to_responses_payload(payload: dict) -> dict:
                         detail = 'auto'
                     content_parts.append({'type': 'input_image', 'image_url': url, 'detail': detail})
                 elif part.get('type') == 'file':
-                    # OpenAI-compatible proxy path only. Open WebUI attachments are handled
-                    # separately via metadata.files/RAG and must not be converted here.
                     file = part.get('file')
                     if isinstance(file, dict):
                         file_part = {k: file[k] for k in ('file_id', 'file_data', 'filename') if k in file}
@@ -1416,8 +1414,15 @@ def convert_to_responses_payload(payload: dict) -> dict:
                         converted_tool['description'] = func['description']
                     if 'parameters' in func:
                         converted_tool['parameters'] = func['parameters']
+                    # Responses tools default to strict mode when the field is
+                    # omitted. Preserve the loose-schema semantics of Chat,
+                    # MCP, and OpenAPI function tools unless strictness was
+                    # explicitly requested by the caller. Keep the old wire
+                    # format for tools without a parameters schema.
                     if 'strict' in func:
                         converted_tool['strict'] = func['strict']
+                    elif 'parameters' in func:
+                        converted_tool['strict'] = False
                 converted_tools.append(converted_tool)
             else:
                 # Already in correct format or unknown format, pass through
