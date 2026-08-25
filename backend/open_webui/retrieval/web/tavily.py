@@ -4,6 +4,7 @@ import logging
 
 import requests
 from open_webui.env import TAVILY_API_BASE_URL
+from open_webui.retrieval.loaders.tavily import DEFAULT_TAVILY_API_BASE_URL
 from open_webui.retrieval.web.main import SearchResult, get_filtered_results
 
 log = logging.getLogger(__name__)
@@ -14,6 +15,7 @@ def search_tavily(
     query: str,
     count: int,
     filter_list: list[str | None] = None,
+    api_base_url: str = DEFAULT_TAVILY_API_BASE_URL,
     # **kwargs,
 ) -> list[SearchResult]:
     """Search using Tavily's Search API and return the results as a list of SearchResult objects.
@@ -22,11 +24,12 @@ def search_tavily(
         api_key (str): A Tavily Search API key
         query (str): The query to search for
         count (int): The maximum number of results to return
+        api_base_url (str): Base URL of the Tavily API, for self-hosted or proxied endpoints
 
     Returns:
         A list of SearchResult objects.
     """
-    url = f'{TAVILY_API_BASE_URL}/search'
+    url = f'{(api_base_url or TAVILY_API_BASE_URL).rstrip("/")}/search'
     headers = {
         'Content-Type': 'application/json',
         'Authorization': f'Bearer {api_key}',

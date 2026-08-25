@@ -81,6 +81,7 @@ from open_webui.retrieval.utils import (
     query_doc,
     query_doc_with_hybrid_search,
 )
+from open_webui.retrieval.skip_extraction import skip_extraction_reason, skip_extraction_stub
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
 from open_webui.retrieval.vector.utils import filter_metadata
@@ -384,6 +385,7 @@ RETRIEVAL_CONFIG_KEYS = {
     'SOUGOU_API_SID': 'web.search.sougou_api_sid',
     'SOUGOU_API_SK': 'web.search.sougou_api_sk',
     'TAVILY_API_KEY': 'web.search.tavily_api_key',
+    'TAVILY_API_BASE_URL': 'web.search.tavily_api_base_url',
     'TAVILY_EXTRACT_DEPTH': 'web.search.tavily_extract_depth',
     'TEXT_SPLITTER': 'rag.text_splitter',
     'TIKA_SERVER_URL': 'rag.tika_server_url',
@@ -738,6 +740,7 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
             'SERPLY_API_KEY': config.SERPLY_API_KEY,
             'DDGS_BACKEND': config.DDGS_BACKEND,
             'TAVILY_API_KEY': config.TAVILY_API_KEY,
+            'TAVILY_API_BASE_URL': config.TAVILY_API_BASE_URL,
             'SEARCHAPI_API_KEY': config.SEARCHAPI_API_KEY,
             'SEARCHAPI_ENGINE': config.SEARCHAPI_ENGINE,
             'SERPAPI_API_KEY': config.SERPAPI_API_KEY,
@@ -817,6 +820,7 @@ class WebConfig(BaseModel):
     SERPLY_API_KEY: str | None = None
     DDGS_BACKEND: str | None = None
     TAVILY_API_KEY: str | None = None
+    TAVILY_API_BASE_URL: str | None = None
     SEARCHAPI_API_KEY: str | None = None
     SEARCHAPI_ENGINE: str | None = None
     SERPAPI_API_KEY: str | None = None
@@ -1297,6 +1301,7 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         config.SERPLY_API_KEY = form_data.web.SERPLY_API_KEY
         config.DDGS_BACKEND = form_data.web.DDGS_BACKEND
         config.TAVILY_API_KEY = form_data.web.TAVILY_API_KEY
+        config.TAVILY_API_BASE_URL = form_data.web.TAVILY_API_BASE_URL
         config.SEARCHAPI_API_KEY = form_data.web.SEARCHAPI_API_KEY
         config.SEARCHAPI_ENGINE = form_data.web.SEARCHAPI_ENGINE
         config.SERPAPI_API_KEY = form_data.web.SERPAPI_API_KEY
@@ -1449,6 +1454,7 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
             'SERPHOUSE_DOMAIN': config.SERPHOUSE_DOMAIN,
             'SERPLY_API_KEY': config.SERPLY_API_KEY,
             'TAVILY_API_KEY': config.TAVILY_API_KEY,
+            'TAVILY_API_BASE_URL': config.TAVILY_API_BASE_URL,
             'SEARCHAPI_API_KEY': config.SEARCHAPI_API_KEY,
             'SEARCHAPI_ENGINE': config.SEARCHAPI_ENGINE,
             'SERPAPI_API_KEY': config.SERPAPI_API_KEY,
@@ -1854,6 +1860,40 @@ def has_vector_results(result) -> bool:
     return bool(result and result.ids and result.ids[0])
 
 
+async def _complete_without_extraction(request, file, user, db, reason: str):
+    """Mark the file processed, keep the blob, do not call Tika or embeddings."""
+    stub = skip_extraction_stub(file.filename, file.id, reason)
+    file_hash = file.hash or (file.meta or {}).get('file_hash')
+    log.info('Skipping text extraction for %s (%s)', file.filename, reason)
+    await Files.update_file_data_by_id(
+        file.id,
+        {
+            'content': stub,
+            'status': 'completed',
+            'error': None,
+            'skip_extraction': True,
+            'skip_extraction_reason': reason,
+        },
+        db=db,
+    )
+    if file_hash:
+        await Files.update_file_hash_by_id(file.id, file_hash, db=db)
+    await publish_event(
+        request,
+        EVENTS.RETRIEVAL_CONTENT_PROCESSED,
+        actor=user,
+        subject_id=file.id,
+        subject_type='file',
+        data={'collection_name': None, 'filename': file.filename, 'skip_extraction': reason},
+    )
+    return {
+        'status': True,
+        'collection_name': None,
+        'filename': file.filename,
+        'content': stub,
+    }
+
+
 @router.post('/process/file')
 async def process_file(
     request: Request,
@@ -1882,6 +1922,10 @@ async def process_file(
             else:
                 await _validate_collection_access([collection_name], user, access_type='write')
             collection_names = [collection_name]
+
+            skip_reason = skip_extraction_reason(file.filename, (file.meta or {}).get('content_type'))
+            if skip_reason:
+                return await _complete_without_extraction(request, file, user, db, skip_reason)
 
             if form_data.content:
                 # Update the content in the file
@@ -2633,6 +2677,7 @@ async def search_web(request: Request, engine: str, query: str, user=None) -> li
                 query,
                 config.WEB_SEARCH_RESULT_COUNT,
                 config.WEB_SEARCH_DOMAIN_FILTER_LIST,
+                api_base_url=config.TAVILY_API_BASE_URL,
             )
         else:
             raise Exception('No TAVILY_API_KEY found in environment variables')
@@ -3067,41 +3112,47 @@ async def query_collection_handler(
 
     try:
         if config.ENABLE_RAG_HYBRID_SEARCH and (form_data.hybrid is None or form_data.hybrid):
-            return await query_collection_with_hybrid_search(
-                collection_names=form_data.collection_names,
-                queries=[form_data.query],
-                embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
-                    query, prefix=prefix, user=user
-                ),
-                k=form_data.k if form_data.k else config.TOP_K,
-                reranking_function=(
-                    (lambda query, documents: request.app.state.RERANKING_FUNCTION(query, documents, user=user))
-                    if request.app.state.RERANKING_FUNCTION
-                    else None
-                ),
-                k_reranker=form_data.k_reranker or config.TOP_K_RERANKER,
-                r=(form_data.r if form_data.r else config.RELEVANCE_THRESHOLD),
-                hybrid_bm25_weight=(
-                    form_data.hybrid_bm25_weight
-                    if form_data.hybrid_bm25_weight is not None
-                    else config.HYBRID_BM25_WEIGHT
-                ),
-                enable_enriched_texts=(
-                    form_data.enable_enriched_texts
-                    if form_data.enable_enriched_texts is not None
-                    else config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS
-                ),
-            )
-        else:
-            return await query_collection(
-                request,
-                collection_names=form_data.collection_names,
-                queries=[form_data.query],
-                embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
-                    query, prefix=prefix, user=user
-                ),
-                k=form_data.k if form_data.k else config.TOP_K,
-            )
+            try:
+                return await query_collection_with_hybrid_search(
+                    collection_names=form_data.collection_names,
+                    queries=[form_data.query],
+                    embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
+                        query, prefix=prefix, user=user
+                    ),
+                    k=form_data.k if form_data.k else config.TOP_K,
+                    reranking_function=(
+                        (lambda query, documents: request.app.state.RERANKING_FUNCTION(query, documents, user=user))
+                        if request.app.state.RERANKING_FUNCTION
+                        else None
+                    ),
+                    k_reranker=form_data.k_reranker or config.TOP_K_RERANKER,
+                    r=(form_data.r if form_data.r else config.RELEVANCE_THRESHOLD),
+                    hybrid_bm25_weight=(
+                        form_data.hybrid_bm25_weight
+                        if form_data.hybrid_bm25_weight is not None
+                        else config.HYBRID_BM25_WEIGHT
+                    ),
+                    enable_enriched_texts=(
+                        form_data.enable_enriched_texts
+                        if form_data.enable_enriched_texts is not None
+                        else config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS
+                    ),
+                )
+            except Exception as hybrid_exc:
+                log.warning(
+                    'Hybrid search failed for /query/collection, falling back to vector-only search: %s',
+                    hybrid_exc,
+                )
+
+        return await query_collection(
+            request,
+            collection_names=form_data.collection_names,
+            queries=[form_data.query],
+            embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
+                query, prefix=prefix, user=user
+            ),
+            k=form_data.k if form_data.k else config.TOP_K,
+        )
 
     except HTTPException:
         raise
@@ -3282,6 +3333,7 @@ async def process_files_batch(
     file_results: list[BatchProcessFilesResult] = []
     file_errors: list[BatchProcessFilesResult] = []
     file_updates: list[FileUpdateForm] = []
+    skipped_results: list[BatchProcessFilesResult] = []
 
     # Prepare all documents first
     all_docs: list[Document] = []
@@ -3307,6 +3359,14 @@ async def process_files_batch(
                         error='Permission denied: not file owner',
                     )
                 )
+                continue
+
+            skip_reason = skip_extraction_reason(
+                db_file.filename, (db_file.meta or {}).get('content_type')
+            )
+            if skip_reason:
+                await _complete_without_extraction(request, db_file, user, db, skip_reason)
+                skipped_results.append(BatchProcessFilesResult(file_id=file.id, status='completed'))
                 continue
 
             text_content = file.data.get('content', '')
@@ -3361,7 +3421,7 @@ async def process_files_batch(
                 file_result.status = 'failed'
                 file_errors.append(BatchProcessFilesResult(file_id=file_result.file_id, status='failed', error=str(e)))
 
-    response = BatchProcessFilesResponse(results=file_results, errors=file_errors)
+    response = BatchProcessFilesResponse(results=file_results + skipped_results, errors=file_errors)
     await publish_event(
         request,
         EVENTS.RETRIEVAL_CONTENT_PROCESSED,
