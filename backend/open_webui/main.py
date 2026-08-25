@@ -194,6 +194,7 @@ from open_webui.socket.main import (
 )
 from open_webui.tasks import (
     cleanup_task,
+    clear_response_stream,
     create_task,
     has_active_tasks,
     list_task_ids_by_item_id,
@@ -241,7 +242,7 @@ from open_webui.utils.middleware import (
     process_chat_payload,
     process_chat_response,
 )
-from open_webui.utils.misc import get_response_error_detail, merge_model_params
+from open_webui.utils.misc import get_response_error_detail, merge_model_params, normalize_tags
 from open_webui.utils.model_ids import strip_provider_model_prefix
 from open_webui.utils.models import (
     check_model_access,
@@ -1741,6 +1742,9 @@ async def chat_completion(
                                 )
                             except asyncio.CancelledError:
                                 pass
+                elif chat_id:
+                    # mirrors middleware's fallback: with no task the stream is keyed by message id
+                    await clear_response_stream(request.app.state.redis, metadata.get('message_id'))
             except Exception:
                 pass
 
