@@ -340,10 +340,7 @@ async def get_note_chat_by_id(
     if chat:
         log.info('[note-chat] reusing hidden chat note_id=%s chat_id=%s user_id=%s', note.id, chat.id, user.id)
         params = {**((chat.chat or {}).get('params') or {})}
-        changed = False
-        if 'note_id' in params:
-            del params['note_id']
-            changed = True
+        changed = params.pop('note_id', None) is not None
 
         system = (
             f'CONTEXT:\nCurrent note id: {note.id}\n'
@@ -430,10 +427,7 @@ async def get_note_chats_by_id(
     normalized_chats = []
     for chat in chats:
         params = {**((chat.chat or {}).get('params') or {})}
-        changed = False
-        if 'note_id' in params:
-            del params['note_id']
-            changed = True
+        changed = params.pop('note_id', None) is not None
 
         system = (
             f'CONTEXT:\nCurrent note id: {note.id}\n'
