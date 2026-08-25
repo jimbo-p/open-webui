@@ -78,7 +78,14 @@ class RedisDict:
     redis.call('set', KEYS[2], ARGV[1], 'EX', 300)
     """
 
-    def __init__(self, name, redis_url, redis_sentinels=[], redis_cluster=False):
+    def __init__(
+        self,
+        name,
+        redis_url,
+        redis_sentinels=[],
+        redis_cluster=False,
+        cache_set_signature=True,
+    ):
         self.name = name
         # Both keys must share a cluster slot: reuse the name's hash tag, or wrap it to make one.
         tag_open = name.find('{')
@@ -94,6 +101,8 @@ class RedisDict:
     def __setitem__(self, key, value):
         serialized_value = JSONCodec.dumps(value)
         self.redis.hset(self.name, key, serialized_value)
+        if self._signature_name:
+            self.redis.delete(self._signature_name)
 
     def __getitem__(self, key):
         value = self.redis.hget(self.name, key)
@@ -105,6 +114,8 @@ class RedisDict:
         result = self.redis.hdel(self.name, key)
         if result == 0:
             raise KeyError(key)
+        if self._signature_name:
+            self.redis.delete(self._signature_name)
 
     def __contains__(self, key):
         return self.redis.hexists(self.name, key)

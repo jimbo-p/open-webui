@@ -111,6 +111,7 @@ from open_webui.env import (
     SAFE_MODE,
     SCIM_TOKEN,
     VERSION,
+    WEBSOCKET_HEARTBEAT_INTERVAL,
     # Admin Account Runtime Creation
     WEBUI_ADMIN_EMAIL,
     WEBUI_ADMIN_NAME,
@@ -139,7 +140,7 @@ from open_webui.models.chats import ChatForm, Chats
 from open_webui.models.config import Config
 from open_webui.models.functions import Functions
 from open_webui.models.messages import Messages
-from open_webui.models.models import Models
+from open_webui.models.models import Models, normalize_model_tags
 from open_webui.models.users import Users
 from open_webui.routers import (
     analytics,
@@ -241,7 +242,7 @@ from open_webui.utils.middleware import (
     process_chat_payload,
     process_chat_response,
 )
-from open_webui.utils.misc import merge_model_params, normalize_tags
+from open_webui.utils.misc import get_response_error_detail, merge_model_params, normalize_tags
 from open_webui.utils.model_ids import strip_provider_model_prefix
 from open_webui.utils.models import (
     check_model_access,
@@ -890,15 +891,16 @@ async def get_models(request: Request, refresh: bool = False, user=Depends(get_v
     models = await get_filtered_models(models, user)
 
     for model in models:
-        meta = model.get('info', {}).get('meta', {})
+        info = model.get('info') if isinstance(model.get('info'), dict) else {}
+        meta = info.get('meta') if isinstance(info.get('meta'), dict) else {}
 
         # Remove profile image URL to reduce payload size
         meta.pop('profile_image_url', None)
 
         if 'tags' in meta:
-            meta['tags'] = normalize_tags(meta['tags'])
+            meta['tags'] = normalize_model_tags(meta['tags'])
 
-        tags = meta.get('tags', []) + normalize_tags(model.get('tags'))
+        tags = normalize_model_tags(meta.get('tags')) + normalize_model_tags(model.get('tags'))
         model['tags'] = list({tag['name']: tag for tag in tags}.values())
 
     model_order_list = await Config.get('ui.model_order_list')
@@ -1098,17 +1100,43 @@ async def chat_completion(
     metadata = {}
     try:
         model_info = None
+        fallback_model = None
+        missing_base_model = False
         if not model_item.get('direct', False):
             if model_id not in request.app.state.MODELS:
                 raise Exception('Model not found')
 
             model = request.app.state.MODELS[model_id]
             model_info = await Models.get_model_by_id(model_id)
+            missing_base_model = bool(
+                model_info
+                and model_info.base_model_id
+                and model_info.base_model_id not in request.app.state.MODELS
+            )
+
+            if missing_base_model and ENABLE_CUSTOM_MODEL_FALLBACK:
+                fallback_model_id = next(
+                    (
+                        model_id.strip()
+                        for model_id in ((await Config.get('ui.default_models')) or '').split(',')
+                        if model_id.strip()
+                    ),
+                    None,
+                )
+                if fallback_model_id:
+                    fallback_model = request.app.state.MODELS.get(fallback_model_id)
 
             # Check if user has access to the model
             if not BYPASS_MODEL_ACCESS_CONTROL and (user.role != 'admin' or not BYPASS_ADMIN_ACCESS_CONTROL):
                 try:
-                    await check_model_access(user, model, model_info=model_info)
+                    access_model_info = (
+                        model_info.model_copy(update={'base_model_id': None})
+                        if fallback_model is not None
+                        else model_info
+                    )
+                    await check_model_access(user, model, model_info=access_model_info)
+                    if fallback_model is not None:
+                        await check_model_access(user, fallback_model)
                 except Exception as e:
                     raise e
         else:
@@ -1129,22 +1157,12 @@ async def chat_completion(
             form_data['params'] = merge_model_params(model_info_params, request_params)
 
         # Check base model existence for custom models
-        if model_info and model_info.base_model_id:
-            base_model_id = model_info.base_model_id
-            if base_model_id not in request.app.state.MODELS:
-                if ENABLE_CUSTOM_MODEL_FALLBACK:
-                    default_models = ((await Config.get('ui.default_models')) or '').split(',')
-
-                    fallback_model_id = default_models[0].strip() if default_models[0] else None
-
-                    if fallback_model_id and fallback_model_id in request.app.state.MODELS:
-                        # Update model and form_data so routing uses the fallback model's type
-                        model = request.app.state.MODELS[fallback_model_id]
-                        form_data['model'] = fallback_model_id
-                    else:
-                        raise Exception('Model not found')
-                else:
-                    raise Exception('Model not found')
+        if missing_base_model:
+            if fallback_model is None:
+                raise Exception('Model not found')
+            # Update model and form_data so routing uses the fallback model's type
+            model = fallback_model
+            form_data['model'] = fallback_model['id']
 
         # Chat Params
         stream_delta_chunk_size = form_data.get('params', {}).get('stream_delta_chunk_size')
@@ -1621,14 +1639,7 @@ async def chat_completion(
             # raise so the except-block below emits chat:message:error +
             # chat:tasks:cancel, unblocking the frontend.
             if isinstance(response, JSONResponse) and response.status_code >= 400:
-                try:
-                    error_body = JSONCodec.loads(response.body.decode('utf-8', 'replace'))
-                    detail = error_body.get('error', error_body) if isinstance(error_body, dict) else error_body
-                    if isinstance(detail, dict):
-                        detail = detail.get('message', detail.get('detail', str(detail)))
-                except Exception:
-                    detail = f'Provider returned HTTP {response.status_code}'
-                raise Exception(detail)
+                raise Exception(get_response_error_detail(response))
 
             ctx = await build_chat_response_context(request, form_data, user, model, metadata, tasks, events)
 
@@ -1856,6 +1867,7 @@ async def chat_completion(
 # Alias for chat_completion (Legacy)
 generate_chat_completions = chat_completion
 generate_chat_completion = chat_completion
+
 
 @app.post('/api/v1/chats/{id}/messages/{message_id}/resolve')
 async def resolve_chat_message_tool_call(
@@ -2296,6 +2308,11 @@ async def get_app_config(request: Request):
             'enable_signup': config.get('ui.enable_signup'),
             'enable_login_form': config.get('ui.enable_login_form'),
             'enable_websocket': ENABLE_WEBSOCKET_SUPPORT,
+            **(
+                {'websocket_heartbeat_interval': WEBSOCKET_HEARTBEAT_INTERVAL}
+                if WEBSOCKET_HEARTBEAT_INTERVAL is not None
+                else {}
+            ),
             # --- Authenticated: only consumed by logged-in frontend ---
             **(
                 {

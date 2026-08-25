@@ -900,11 +900,12 @@ class ChatTable:
     def merge_history(existing_history: dict | None, incoming_history: dict | None) -> dict:
         existing = (existing_history or {}).get('messages') or {}
         incoming = (incoming_history or {}).get('messages') or {}
-        merged = {**existing, **incoming}
-        merged = {message_id: message for message_id, message in merged.items() if isinstance(message, dict)}
+        merged = {
+            message_id: {**message, 'childrenIds': []}
+            for message_id, message in {**existing, **incoming}.items()
+            if isinstance(message, dict)
+        }
 
-        for message in merged.values():
-            message['childrenIds'] = []
         for message_id, message in merged.items():
             parent_id = message.get('parentId')
             if parent_id in merged:

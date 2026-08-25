@@ -1,10 +1,22 @@
 import datetime as dt
 from typing import Any
 
+from open_webui.env import RAG_METADATA_MAX_VALUE_CHARS
 from open_webui.retrieval.vector.main import SearchResult
 from open_webui.utils.misc import sanitize_text_for_db
 
-KEYS_TO_EXCLUDE = ['content', 'pages', 'tables', 'paragraphs', 'sections', 'figures']
+KEYS_TO_EXCLUDE = [
+    'content',
+    'pages',
+    'tables',
+    'paragraphs',
+    'sections',
+    'figures',
+    'documents',
+    'keyValuePairs',
+    'styles',
+    'languages',
+]
 
 # A nested metadata value is deep-copied onto every chunk by the text splitter and then
 # stringified by process_metadata before storage, so a single unbounded one costs memory
@@ -35,6 +47,12 @@ def process_metadata(
             continue
         if value is None:
             continue
+        if RAG_METADATA_MAX_VALUE_CHARS is not None and isinstance(value, (list, dict)):
+            try:
+                if len(str(value)) > RAG_METADATA_MAX_VALUE_CHARS:
+                    continue
+            except (MemoryError, RecursionError, ValueError):
+                continue
         # Convert non-serializable fields to strings
         if isinstance(value, (dt.datetime, list, dict)):
             result[key] = sanitize_text_for_db(str(value))

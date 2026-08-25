@@ -377,9 +377,8 @@ REDIS_CLUSTER = os.getenv('REDIS_CLUSTER', 'False').lower() == 'true'
 REDIS_KEY_PREFIX = os.getenv('REDIS_KEY_PREFIX', 'open-webui')
 
 # TTL in seconds for in-flight response-stream state; values <= 0 disable expiry
-REDIS_RESPONSE_STREAM_TTL = os.getenv('REDIS_RESPONSE_STREAM_TTL', '3600')
 try:
-    REDIS_RESPONSE_STREAM_TTL = int(REDIS_RESPONSE_STREAM_TTL)
+    REDIS_RESPONSE_STREAM_TTL = int(os.getenv('REDIS_RESPONSE_STREAM_TTL', '3600'))
 except ValueError:
     REDIS_RESPONSE_STREAM_TTL = 3600
 
@@ -513,6 +512,15 @@ try:
     WEBSOCKET_SERVER_PING_INTERVAL = int(WEBSOCKET_SERVER_PING_INTERVAL)
 except ValueError:
     WEBSOCKET_SERVER_PING_INTERVAL = 25
+
+WEBSOCKET_HEARTBEAT_INTERVAL = os.getenv('WEBSOCKET_HEARTBEAT_INTERVAL', '')
+if WEBSOCKET_HEARTBEAT_INTERVAL == '':
+    WEBSOCKET_HEARTBEAT_INTERVAL = None
+else:
+    try:
+        WEBSOCKET_HEARTBEAT_INTERVAL = min(max(int(WEBSOCKET_HEARTBEAT_INTERVAL), 5), 90)
+    except ValueError:
+        WEBSOCKET_HEARTBEAT_INTERVAL = 30
 
 WEBSOCKET_EVENT_CALLER_TIMEOUT = os.getenv('WEBSOCKET_EVENT_CALLER_TIMEOUT', '')
 
@@ -820,6 +828,16 @@ BYPASS_RETRIEVAL_ACCESS_CONTROL = os.getenv('BYPASS_RETRIEVAL_ACCESS_CONTROL', '
 # for non-admin users.  When False (default), unknown collection names are
 # denied — closing the legacy unscoped namespace.
 ENABLE_RETRIEVAL_UNSCOPED_COLLECTIONS = os.getenv('ENABLE_RETRIEVAL_UNSCOPED_COLLECTIONS', 'False').lower() == 'true'
+
+# Falls back to the upload size limit, because a document cannot legitimately carry more metadata
+# than the file itself is allowed to be. Left unbounded, a small archive that expands enormously
+# during extraction can exhaust memory. RAG_FILE_MAX_SIZE is in MB.
+RAG_METADATA_MAX_VALUE_CHARS = (
+    int(os.getenv('RAG_METADATA_MAX_VALUE_CHARS'))
+    if os.getenv('RAG_METADATA_MAX_VALUE_CHARS')
+    else ((int(os.getenv('RAG_FILE_MAX_SIZE', '0')) or 0) * 1024 * 1024 or None)
+)
+
 MINERU_MAX_MARKDOWN_BYTES = (
     int(os.getenv('MINERU_MAX_MARKDOWN_BYTES')) if os.getenv('MINERU_MAX_MARKDOWN_BYTES') else None
 )

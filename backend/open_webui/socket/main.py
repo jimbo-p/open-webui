@@ -16,6 +16,7 @@ from open_webui.env import (
     GLOBAL_LOG_LEVEL,
     REDIS_KEY_PREFIX,
     WEBSOCKET_EVENT_CALLER_TIMEOUT,
+    WEBSOCKET_HEARTBEAT_INTERVAL,
     WEBSOCKET_MANAGER,
     WEBSOCKET_REDIS_CLUSTER,
     WEBSOCKET_REDIS_LOCK_TIMEOUT,
@@ -105,7 +106,11 @@ else:
 
 # Timeout duration in seconds
 TIMEOUT_DURATION = 3
-SESSION_POOL_TIMEOUT = 120  # seconds without heartbeat before session is reaped
+SESSION_POOL_TIMEOUT = (
+    max(WEBSOCKET_HEARTBEAT_INTERVAL * 4, 120)
+    if WEBSOCKET_HEARTBEAT_INTERVAL is not None
+    else 120
+)
 
 # Dictionary to maintain the user pool
 
@@ -124,6 +129,7 @@ if WEBSOCKET_MANAGER == 'redis':
         redis_url=WEBSOCKET_REDIS_URL,
         redis_sentinels=ws_sentinels,
         redis_cluster=WEBSOCKET_REDIS_CLUSTER,
+        cache_set_signature=True,
     )
 
     SESSION_POOL = RedisDict(

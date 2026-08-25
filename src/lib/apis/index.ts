@@ -1,5 +1,6 @@
 import { WEBUI_BASE_URL } from '$lib/constants';
-import { convertOpenApiToToolPayload, normalizeTags } from '$lib/utils';
+import { convertOpenApiToToolPayload } from '$lib/utils';
+import { normalizeTags } from '$lib/utils/tags';
 import { getOpenAIModelsDirect } from './openai';
 
 const TOOL_SERVER_FETCH_TIMEOUT = 10000;

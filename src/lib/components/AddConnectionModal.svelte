@@ -18,7 +18,7 @@
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import XMark from '$lib/components/icons/XMark.svelte';
 	import Textarea from './common/Textarea.svelte';
-	import { normalizeTags } from '$lib/utils';
+	import { normalizeTags } from '$lib/utils/tags';
 
 	export let onSubmit: Function = () => {};
 	export let onDelete: Function = () => {};
