@@ -21,7 +21,7 @@ def search_microsoft_web_iq(
     user=None,
 ) -> list[SearchResult]:
     try:
-        api_base_url = api_base_url.rstrip('/')
+        api_base_url = (api_base_url or DEFAULT_MICROSOFT_WEB_IQ_API_BASE_URL).rstrip('/')
         headers = {
             'host': urlparse(api_base_url).netloc or 'api.microsoft.ai',
             'x-apikey': api_key,
