@@ -1340,7 +1340,7 @@ async def get_terminal_servers(request: Request):
                 terminal_servers = JSONCodec.loads(data)
                 request.app.state.TERMINAL_SERVERS = terminal_servers
         except Exception as e:
-            log.error(f'Error fetching terminal_servers from Redis: {e}')
+            log.error(f'Error reading terminal_servers from Redis: {e}')
 
     if terminal_servers is None:
         terminal_servers = await set_terminal_servers(request)

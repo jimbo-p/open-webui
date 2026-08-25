@@ -176,6 +176,7 @@ async def get_tools(
             )
 
     if not bypass_access_control:
+        # Local tools arrive access-filtered from the query; server entries are config-driven.
         tools = [
             tool
             for tool in tools
