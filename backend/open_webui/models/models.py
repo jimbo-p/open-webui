@@ -108,7 +108,7 @@ class ModelMeta(BaseModel):
 
     @model_validator(mode='before')
     @classmethod
-    def normalize_tags(cls, data):
+    def normalize_meta_tags(cls, data):
         if isinstance(data, dict) and 'tags' in data:
             data['tags'] = normalize_model_tags(data['tags'])
         return data

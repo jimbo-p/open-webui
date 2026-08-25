@@ -177,9 +177,8 @@ class ToolsTable:
         user_group_ids: set[str] | None = None,
         permission: str = 'read',
     ) -> list[ToolUserModel]:
+        """List tools, scoped to what user_id may read when given."""
         async with get_async_db_context(db) as db:
-            # Skip Tool.content (plugin source, potentially large) via a
-            # column select; Row attributes satisfy from_attributes.
             stmt = (
                 select(Tool.id, Tool.user_id, Tool.name, Tool.specs, Tool.meta, Tool.updated_at, Tool.created_at)
                 if defer_content
