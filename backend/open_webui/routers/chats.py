@@ -2152,7 +2152,6 @@ async def get_chat_tags_by_id(id: str, user=Depends(get_verified_user), db: Asyn
         user,
         db=db,
     )
-
     if chat:
         tags = chat.meta.get('tags', [])
         return await Tags.get_tags_by_ids_and_user_id(tags, chat.user_id, db=db)
