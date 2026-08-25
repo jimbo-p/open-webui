@@ -21,6 +21,7 @@ from open_webui.env import (
     WEBSOCKET_REDIS_CLUSTER,
     WEBSOCKET_REDIS_LOCK_TIMEOUT,
     WEBSOCKET_REDIS_OPTIONS,
+    WEBSOCKET_REDIS_ROOM_CHANNELS,
     WEBSOCKET_REDIS_URL,
     WEBSOCKET_SENTINEL_HOSTS,
     WEBSOCKET_SENTINEL_PORT,
@@ -35,7 +36,8 @@ from open_webui.models.chats import Chats
 from open_webui.models.folders import Folders
 from open_webui.models.notes import Notes, NoteUpdateForm
 from open_webui.models.users import UserNameResponse, Users
-from open_webui.socket.utils import RedisDict, RedisLock, YdocManager
+from open_webui.socket.redis_room_channels import AsyncRedisRoomChannelManager
+from open_webui.socket.utils import RedisDict, RedisLock, YdocManager, build_prosemirror_update
 from open_webui.tasks import create_task, stop_item_tasks
 from open_webui.utils.access_control import has_permission
 from open_webui.utils.auth import get_verified_user_by_token
@@ -72,7 +74,8 @@ if WEBSOCKET_MANAGER == 'redis':
         if sentinel_hosts
         else WEBSOCKET_REDIS_URL
     )
-    redis_manager = socketio.AsyncRedisManager(ws_redis_url, redis_options=WEBSOCKET_REDIS_OPTIONS, json=SOCKETIO_JSON)
+    manager_class = AsyncRedisRoomChannelManager if WEBSOCKET_REDIS_ROOM_CHANNELS else socketio.AsyncRedisManager
+    redis_manager = manager_class(ws_redis_url, redis_options=WEBSOCKET_REDIS_OPTIONS, json=SOCKETIO_JSON)
     sio = socketio.AsyncServer(
         cors_allowed_origins=SOCKETIO_CORS_ORIGINS,
         async_mode='asgi',
@@ -175,48 +178,65 @@ YDOC_MANAGER = YdocManager(
 )
 
 
+def session_pool_batches():
+    """All session pool entries, in bounded batches for the Redis backing."""
+    if WEBSOCKET_MANAGER == 'redis':
+        return SESSION_POOL.scan_batches()
+    return [list(SESSION_POOL.items())]
+
+
 async def periodic_session_pool_cleanup():
     """Reap orphaned SESSION_POOL entries that missed heartbeats (e.g. crashed instance)."""
     retry_delay = random.uniform(WEBSOCKET_REDIS_LOCK_TIMEOUT / 2, WEBSOCKET_REDIS_LOCK_TIMEOUT)
     renew_interval = max(WEBSOCKET_REDIS_LOCK_TIMEOUT / 2, 0.5)
     while True:
-        if not session_aquire_func():
-            log.debug('Session cleanup lock held by another node. Retrying.')
-            await asyncio.sleep(retry_delay)
-            continue
-
         try:
-            while True:
-                if not session_renew_func():
-                    log.warning('Unable to renew session cleanup lock. Retrying cleanup ownership.')
-                    break
+            if not session_aquire_func():
+                log.debug('Session cleanup lock held by another node. Retrying.')
+                await asyncio.sleep(retry_delay)
+                continue
 
-                now = int(time.time())
-                for sid in list(SESSION_POOL.keys()):
-                    entry = SESSION_POOL.get(sid)
-                    if entry and now - entry.get('last_seen_at', 0) > SESSION_POOL_TIMEOUT:
-                        log.warning(f'Reaping orphaned session {sid} (user {entry.get("id")})')
-                        try:
-                            del SESSION_POOL[sid]
-                        except KeyError:
-                            pass
-
-                next_cleanup_at = time.monotonic() + SESSION_POOL_TIMEOUT
-                lock_lost = False
+            try:
                 while True:
-                    sleep_for = min(renew_interval, next_cleanup_at - time.monotonic())
-                    if sleep_for <= 0:
-                        break
-                    await asyncio.sleep(sleep_for)
                     if not session_renew_func():
                         log.warning('Unable to renew session cleanup lock. Retrying cleanup ownership.')
-                        lock_lost = True
                         break
 
-                if lock_lost:
-                    break
-        finally:
-            session_release_func()
+                    now = int(time.time())
+                    for batch in session_pool_batches():
+                        expired = {
+                            sid: entry.get('id')
+                            for sid, entry in batch
+                            if now - entry.get('last_seen_at', 0) > SESSION_POOL_TIMEOUT
+                        }
+                        if expired:
+                            log.warning('Reaping %d orphaned session(s) (sid: user): %s', len(expired), expired)
+                            if WEBSOCKET_MANAGER == 'redis':
+                                SESSION_POOL.discard(*expired)
+                            else:
+                                for sid in expired:
+                                    SESSION_POOL.pop(sid, None)
+                        await asyncio.sleep(0)  # don't hold the loop for the whole sweep
+
+                    next_cleanup_at = time.monotonic() + SESSION_POOL_TIMEOUT
+                    lock_lost = False
+                    while True:
+                        sleep_for = min(renew_interval, next_cleanup_at - time.monotonic())
+                        if sleep_for <= 0:
+                            break
+                        await asyncio.sleep(sleep_for)
+                        if not session_renew_func():
+                            log.warning('Unable to renew session cleanup lock. Retrying cleanup ownership.')
+                            lock_lost = True
+                            break
+
+                    if lock_lost:
+                        break
+            finally:
+                session_release_func()
+        except Exception:
+            log.exception('Session pool cleanup failed. Retrying.')
+            await asyncio.sleep(retry_delay)
 
 
 async def periodic_usage_pool_cleanup():
@@ -289,10 +309,12 @@ def get_session_ids_from_room(room):
     return list(members) if members else []
 
 
-def get_session_ids_by_user_id(user_id: str) -> list[str]:
+async def get_session_ids_by_user_id(user_id: str) -> list[str]:
     """Get known session IDs for a user across the local rooms and shared session pool."""
     session_ids = set(get_session_ids_from_room(f'user:{user_id}'))
-    session_ids.update(sid for sid, entry in SESSION_POOL.items() if entry and entry.get('id') == user_id)
+    for batch in session_pool_batches():
+        session_ids.update(sid for sid, entry in batch if entry.get('id') == user_id)
+        await asyncio.sleep(0)  # don't hold the loop for the whole pool
     return list(session_ids)
 
 
@@ -351,7 +373,7 @@ async def disconnect_user_sessions(user_id: str):
     The client will automatically reconnect and re-authenticate with
     fresh data from the database.
     """
-    session_ids = get_session_ids_by_user_id(user_id)
+    session_ids = await get_session_ids_by_user_id(user_id)
     for sid in session_ids:
         try:
             await sio.disconnect(sid)
@@ -628,6 +650,7 @@ async def ydoc_document_join(sid, data):
     try:
         document_id = normalize_document_id(data['document_id'])
 
+        note = None
         if document_id.startswith('note:'):
             note_id = document_id.split(':')[1]
             note = await Notes.get_note_by_id(note_id)
@@ -661,8 +684,20 @@ async def ydoc_document_join(sid, data):
         active_session_ids = get_session_ids_from_room(f'doc_{document_id}')
 
         # Get the Yjs document state
-        ydoc = Y.Doc()
         updates = await YDOC_MANAGER.get_updates(document_id)
+
+        # Without this a note written outside the editor opens empty, and its first save wins.
+        if not updates and note:
+            try:
+                content = (note.data or {}).get('content') or {}
+                seed_update = build_prosemirror_update(content.get('json'))
+                if seed_update:
+                    await YDOC_MANAGER.append_to_updates(document_id=document_id, update=seed_update)
+                    updates = [seed_update]
+            except Exception:
+                log.exception('Failed to seed document %s from stored note content', document_id)
+
+        ydoc = Y.Doc()
         for update in updates:
             ydoc.apply_update(bytes(update))
 
@@ -805,27 +840,28 @@ async def yjs_document_update(sid, data):
                 log.warning(f'User {user.get("id")} does not have write access to note {note_id}. Rejecting update.')
                 return
 
-        user_id = data.get('user_id', sid)
+        update = data.get('update')  # absent when a client only refreshes the content to be saved
 
-        update = data['update']  # List of bytes from frontend
+        if update:
+            user_id = data.get('user_id', sid)
 
-        await YDOC_MANAGER.append_to_updates(
-            document_id=document_id,
-            update=update,  # Convert list of bytes to bytes
-        )
+            await YDOC_MANAGER.append_to_updates(
+                document_id=document_id,
+                update=update,
+            )
 
-        # Broadcast update to all other users in the document
-        await sio.emit(
-            'ydoc:document:update',
-            {
-                'document_id': document_id,
-                'user_id': user_id,
-                'update': update,
-                'socket_id': sid,  # Add socket_id to match frontend filtering
-            },
-            room=f'doc_{document_id}',
-            skip_sid=sid,
-        )
+            # Broadcast update to all other users in the document
+            await sio.emit(
+                'ydoc:document:update',
+                {
+                    'document_id': document_id,
+                    'user_id': user_id,
+                    'update': update,
+                    'socket_id': sid,  # Add socket_id to match frontend filtering
+                },
+                room=f'doc_{document_id}',
+                skip_sid=sid,
+            )
 
         async def debounced_save():
             await asyncio.sleep(0.5)
@@ -907,23 +943,23 @@ async def yjs_awareness_update(sid, data):
 
 @sio.event
 async def disconnect(sid, reason=None):
-    if sid in SESSION_POOL:
+    try:
         del SESSION_POOL[sid]
-
-        # Clean up USAGE_POOL entries for this session
-        for model_id in list(USAGE_POOL.keys()):
-            connections = USAGE_POOL.get(model_id)
-            if connections and sid in connections:
-                del connections[sid]
-                if not connections:
-                    del USAGE_POOL[model_id]
-                else:
-                    USAGE_POOL[model_id] = connections
-
-        await YDOC_MANAGER.remove_user_from_all_documents(sid)
-    else:
+    except KeyError:
         pass
-        # print(f"Unknown session ID {sid} disconnected")
+
+    for model_id, connections in list(USAGE_POOL.items()):
+        if sid in connections:
+            del connections[sid]
+            if not connections:
+                try:
+                    del USAGE_POOL[model_id]
+                except KeyError:
+                    pass
+            else:
+                USAGE_POOL[model_id] = connections
+
+    await YDOC_MANAGER.remove_user_from_all_documents(sid)
 
 
 async def _make_channel_emitter(request_info):
