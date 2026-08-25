@@ -376,6 +376,7 @@ REDIS_CLUSTER = os.getenv('REDIS_CLUSTER', 'False').lower() == 'true'
 
 REDIS_KEY_PREFIX = os.getenv('REDIS_KEY_PREFIX', 'open-webui')
 
+# TTL in seconds for in-flight response-stream state; values <= 0 disable expiry
 try:
     REDIS_RESPONSE_STREAM_TTL = int(os.getenv('REDIS_RESPONSE_STREAM_TTL', '3600'))
 except ValueError:
@@ -477,6 +478,11 @@ else:
 
 WEBSOCKET_REDIS_URL = os.getenv('WEBSOCKET_REDIS_URL', REDIS_URL)
 WEBSOCKET_REDIS_CLUSTER = os.getenv('WEBSOCKET_REDIS_CLUSTER', str(REDIS_CLUSTER)).lower() == 'true'
+
+# publishes room-targeted emits on per-room redis channels so instances skip
+# messages for rooms without local members; must be identical across the fleet
+# (toggle with a full restart, not a rolling one)
+WEBSOCKET_REDIS_ROOM_CHANNELS = os.getenv('WEBSOCKET_REDIS_ROOM_CHANNELS', 'False').lower() == 'true'
 
 websocket_redis_lock_timeout = os.getenv('WEBSOCKET_REDIS_LOCK_TIMEOUT', '60')
 
@@ -836,6 +842,10 @@ MINERU_MAX_MARKDOWN_BYTES = (
     int(os.getenv('MINERU_MAX_MARKDOWN_BYTES')) if os.getenv('MINERU_MAX_MARKDOWN_BYTES') else None
 )
 
+# Most an archive-based document may unpack to. A 120k-row spreadsheet reaches ~33 MB.
+# Set to 0 to disable the check.
+RAG_FILE_MAX_UNPACKED_SIZE = int(os.getenv('RAG_FILE_MAX_UNPACKED_SIZE', 100 * 1024 * 1024))
+
 # When enabled, skips pydub-based preprocessing (format conversion, compression,
 # and chunked splitting) before sending files to processing engines. Useful when
 # the upstream provider handles these steps or when ffmpeg is unavailable.
@@ -1011,6 +1021,16 @@ EXTERNAL_PWA_MANIFEST_URL = os.getenv('EXTERNAL_PWA_MANIFEST_URL', None)
 # Env var values: "true" (anyone), "false" (no one), "members" (only group members).
 _default_group_share = os.getenv('DEFAULT_GROUP_SHARE_PERMISSION', 'members').strip().lower()
 DEFAULT_GROUP_SHARE_PERMISSION = 'members' if _default_group_share == 'members' else _default_group_share == 'true'
+
+####################################
+# CONFIG
+####################################
+
+# Seconds to hold the config table in memory. Floored at 1 because ttl=0 in aiocache means never expire.
+try:
+    CONFIG_CACHE_TTL = max(int(os.getenv('CONFIG_CACHE_TTL', '1')), 1)
+except (ValueError, TypeError):
+    CONFIG_CACHE_TTL = 1
 
 ####################################
 # MODELS
