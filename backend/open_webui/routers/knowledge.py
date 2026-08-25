@@ -80,6 +80,7 @@ async def delete_file_resource(file: FileModel, db: AsyncSession) -> bool:
 
     return result
 
+
 ############################
 # Knowledge Base Embedding
 ############################
