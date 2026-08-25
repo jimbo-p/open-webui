@@ -497,6 +497,15 @@ function findOutputItemIndex(output: OutputItem[], item: OutputItem): number {
 	);
 }
 
+function responseEventUpdatesOutputItem(eventType: string): boolean {
+	return (
+		eventType === 'response.content_part.added' ||
+		eventType === 'response.reasoning_summary_part.added' ||
+		eventType.endsWith('.delta') ||
+		eventType.endsWith('.done')
+	);
+}
+
 export function applyResponseStreamEvent(
 	output: OutputItem[] = [],
 	event: ResponseStreamEvent
@@ -546,13 +555,7 @@ export function applyResponseStreamEvent(
 		return nextOutput;
 	}
 
-	// ensureItem below creates the item when it is missing, so only types handled below may reach it.
-	const handledBelow =
-		eventType === 'response.content_part.added' ||
-		eventType === 'response.reasoning_summary_part.added' ||
-		eventType.endsWith('.delta') ||
-		eventType.endsWith('.done');
-	if (!handledBelow) {
+	if (!responseEventUpdatesOutputItem(eventType)) {
 		return output;
 	}
 
