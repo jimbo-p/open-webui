@@ -113,6 +113,24 @@
 	import QueuedMessageItem from './MessageInput/QueuedMessageItem.svelte';
 	import TaskList from './Messages/ResponseMessage/TaskList.svelte';
 
+	const isHeifFamily = (file) => {
+		const type = (file?.type || '').toLowerCase();
+		if (
+			type === 'image/heic' ||
+			type === 'image/heif' ||
+			type === 'image/heic-sequence' ||
+			type === 'image/heif-sequence'
+		) {
+			return true;
+		}
+		// Fallback: some browsers/OSes send an empty or generic type for HEIC files.
+		// Fall back to checking the filename extension in that case.
+		if (!type || type === 'application/octet-stream') {
+			return /\.(heic|heif)$/i.test(file?.name || '');
+		}
+		return false;
+	};
+
 	const i18n = getContext('i18n');
 
 	type AskUserPrompt = {
@@ -663,6 +681,9 @@
 		view.dispatch(tr);
 
 		await tick();
+		chatInputElement?.setText(prompt);
+
+		await tick();
 		await inputVariableHandler(text);
 		await tick();
 		focus({ preventScroll: true });
@@ -1102,7 +1123,7 @@
 				return;
 			}
 
-			if (file['type'].startsWith('image/')) {
+			if (file['type'].startsWith('image/') || isHeifFamily(file)) {
 				if (visionCapableModels.length === 0) {
 					toast.error($i18n.t('Selected model(s) do not support image inputs'));
 					return;
@@ -1162,13 +1183,13 @@
 						];
 					} else {
 						const blob = await (await fetch(imageUrl)).blob();
-						const compressedFile = new File([blob], file.name, { type: file.type });
+						const compressedFile = new File([blob], file.name, { type: blob.type });
 
 						uploadFileHandler(compressedFile, false);
 					}
 				};
 
-				reader.readAsDataURL(file['type'] === 'image/heic' ? await convertHeicToJpeg(file) : file);
+				reader.readAsDataURL(isHeifFamily(file) ? await convertHeicToJpeg(file) : file);
 			} else {
 				uploadFileHandler(file);
 			}
