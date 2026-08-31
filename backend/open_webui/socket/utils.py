@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import uuid
 
 import pycrdt as Y
@@ -152,10 +153,11 @@ class RedisDict:
 
     discard = delete_many
 
-    def set(self, mapping: dict):
+    def set(self, mapping: dict) -> bool:
+        """Replace the hash contents. False when the payload already matches Redis."""
         if not mapping:
             self.clear()
-            return
+            return True
 
         # Serialize values once — reused for both the fingerprint and the write.
         serialized = {k: JSONCodec.dumps(v) for k, v in mapping.items()}
@@ -169,12 +171,13 @@ class RedisDict:
 
         # Fast path: skip sending the payload when the hash already holds it; a lost race self-heals.
         if self.redis.get(self._signature_name) == signature and self.redis.exists(self.name):
-            return
+            return False
 
         args = [signature]
         for field, value in serialized.items():
             args += [field, value]
         self.redis.eval(self._SET_SCRIPT, 2, self.name, self._signature_name, *args)
+        return True
 
     def get(self, key, default=None):
         try:
@@ -196,6 +199,81 @@ class RedisDict:
         if key not in self:
             self[key] = default
         return self[key]
+
+
+class CachedRedisDict(RedisDict):
+    """Answers reads from a per-process snapshot, refetched at most once per TTL.
+
+    Only for rarely-changing data. Another worker's writes lag by up to the TTL.
+    """
+
+    TTL_SECONDS = 5
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._cache = {}
+        self._cache_expires_at = 0.0
+
+    def _snapshot(self) -> dict:
+        now = time.monotonic()
+        if now >= self._cache_expires_at:
+            self._cache = {k: JSONCodec.loads(v) for k, v in self.redis.hgetall(self.name).items()}
+            self._cache_expires_at = now + self.TTL_SECONDS
+        return self._cache
+
+    def __getitem__(self, key):
+        return self._snapshot()[key]
+
+    def __contains__(self, key):
+        return key in self._snapshot()
+
+    def __len__(self):
+        return len(self._snapshot())
+
+    def keys(self):
+        return list(self._snapshot().keys())
+
+    def values(self):
+        return list(self._snapshot().values())
+
+    def items(self):
+        return list(self._snapshot().items())
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        self._cache_expires_at = 0.0
+
+    def __delitem__(self, key):
+        super().__delitem__(key)
+        self._cache_expires_at = 0.0
+
+    def get(self, key, default=None):
+        return self._snapshot().get(key, default)
+
+    def set(self, mapping: dict) -> bool:
+        # Drop the snapshot rather than seed it from `mapping`: callers keep
+        # mutating those dicts after handing them over.
+        wrote = super().set(mapping)
+        if wrote:
+            self._cache_expires_at = 0.0
+        return wrote
+
+    def delete_many(self, *keys):
+        super().delete_many(*keys)
+        self._cache_expires_at = 0.0
+
+    def update(self, other=None, **kwargs):
+        super().update(other, **kwargs)
+        self._cache_expires_at = 0.0
+
+    def setdefault(self, key, default=None):
+        value = super().setdefault(key, default)
+        self._cache_expires_at = 0.0
+        return value
+
+    def clear(self):
+        super().clear()
+        self._cache_expires_at = 0.0
 
 
 def _append_prosemirror_nodes(parent, nodes) -> None:

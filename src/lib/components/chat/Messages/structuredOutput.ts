@@ -546,6 +546,9 @@ export function applyResponseStreamEvent(
 		} else if (outputIndex < nextOutput.length) {
 			nextOutput.splice(outputIndex, 0, item);
 		} else {
+			while (nextOutput.length < outputIndex) {
+				nextOutput.push({ type: 'message', status: 'in_progress', role: 'assistant', content: [] });
+			}
 			nextOutput.push(item);
 		}
 		return nextOutput;
@@ -562,6 +565,9 @@ export function applyResponseStreamEvent(
 		} else if (outputIndex < nextOutput.length) {
 			nextOutput[outputIndex] = item;
 		} else {
+			while (nextOutput.length < outputIndex) {
+				nextOutput.push({ type: 'message', status: 'in_progress', role: 'assistant', content: [] });
+			}
 			nextOutput.push(item);
 		}
 		return nextOutput;

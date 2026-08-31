@@ -38,7 +38,7 @@ from open_webui.models.folders import Folders
 from open_webui.models.notes import Notes, NoteUpdateForm
 from open_webui.models.users import UserNameResponse, Users
 from open_webui.socket.redis_room_channels import AsyncRedisRoomChannelManager
-from open_webui.socket.utils import RedisDict, RedisLock, YdocManager, build_prosemirror_update
+from open_webui.socket.utils import CachedRedisDict, RedisDict, RedisLock, YdocManager, build_prosemirror_update
 from open_webui.tasks import create_task, stop_item_tasks
 from open_webui.utils.access_control import has_permission
 from open_webui.utils.auth import get_verified_user_by_token
@@ -135,7 +135,7 @@ if WEBSOCKET_MANAGER == 'redis':
         async_mode=True,
     )
 
-    MODELS = RedisDict(
+    MODELS = CachedRedisDict(
         f'{REDIS_KEY_PREFIX}:models',
         redis_url=WEBSOCKET_REDIS_URL,
         redis_sentinels=ws_sentinels,
