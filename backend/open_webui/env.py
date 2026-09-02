@@ -382,6 +382,13 @@ try:
 except ValueError:
     REDIS_RESPONSE_STREAM_TTL = 3600
 
+# TTL for cached OpenAPI tool/terminal server specs. 0 disables expiry.
+# A failed refresh must not persist forever when this is the only timer.
+try:
+    TOOL_SERVERS_CACHE_TTL = int(os.getenv('TOOL_SERVERS_CACHE_TTL', '300'))
+except ValueError:
+    TOOL_SERVERS_CACHE_TTL = 300
+
 REDIS_SENTINEL_HOSTS = os.getenv('REDIS_SENTINEL_HOSTS', '')
 REDIS_SENTINEL_PORT = os.getenv('REDIS_SENTINEL_PORT', '26379')
 
