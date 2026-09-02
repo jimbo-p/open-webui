@@ -74,6 +74,10 @@ SKIP_EXTRACTION_EXTENSIONS = frozenset(
         'sqlite',
         'sqlite3',
         'pcap',
+        # analytics workbooks (zip of binary, not documents)
+        'dxp',
+        'pbix',
+        'pbit',
     }
 )
 
@@ -109,6 +113,9 @@ SKIP_EXTRACTION_MIME_TYPES = frozenset(
         'application/acad',
         'application/x-dwg',
         'application/dxf',
+        'application/vnd.spotfire.dxp',
+        'application/vnd.ms-powerbi.report',
+        'application/vnd.ms-powerbi.template',
     }
 )
 
