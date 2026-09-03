@@ -3716,6 +3716,9 @@ async def create_automation(
     if not __user__:
         return JSONCodec.dumps({'error': 'User context not available'})
 
+    if (__metadata__ or {}).get('automation_id'):
+        return JSONCodec.dumps({'error': 'Cannot create an automation from an automated run'})
+
     try:
         from open_webui.models.automations import AutomationData, AutomationForm, AutomationTarget, Automations
         from open_webui.models.users import Users

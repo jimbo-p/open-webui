@@ -741,11 +741,13 @@ async def get_builtin_tools(
     if is_builtin_tool_enabled('tasks') and is_saved_chat_id(metadata.get('chat_id')):
         builtin_functions.extend([create_tasks, update_task])
 
-    # Automation tools - create and manage scheduled automations from chat
+    # Automation tools - create and manage scheduled automations from chat.
+    # Omit the whole category on scheduled runs so they cannot spawn more automations.
     if (
         is_builtin_tool_enabled('automations')
         and config.get('automations.enable')
         and await has_user_permission('automations')
+        and not metadata.get('automation_id')
     ):
         builtin_functions.extend(
             [create_automation, update_automation, list_automations, toggle_automation, delete_automation]
