@@ -1,14 +1,32 @@
 """Fork-only: skip Tika and embeddings for formats that are never worth it.
 
-Zip-of-documents is still extracted. These are coordinate/binary/array
-containers: even unzipped they produce garbage chunks.
+Zip-of-documents is still extracted. These are structured data, coordinate,
+binary, or array containers that produce poor search chunks.
 """
 
 from pathlib import Path
 
-# GIS / CAD / meshes / scientific arrays. Not archives, office, pdf, or geojson.
+# Structured/tabular data, GIS, CAD, meshes, and scientific arrays. Not
+# general archives, word-processing documents, presentations, PDF, or GeoJSON.
 SKIP_EXTRACTION_EXTENSIONS = frozenset(
     {
+        # delimited data / spreadsheet workbooks and templates
+        'csv',
+        'tsv',
+        'tab',
+        'xls',
+        'xlsx',
+        'xlsm',
+        'xlsb',
+        'xlt',
+        'xltx',
+        'xltm',
+        'xla',
+        'xlam',
+        'ods',
+        'ots',
+        'fods',
+        'numbers',
         # geospatial vectors / packages
         'kml',
         'kmz',
@@ -83,6 +101,24 @@ SKIP_EXTRACTION_EXTENSIONS = frozenset(
 
 SKIP_EXTRACTION_MIME_TYPES = frozenset(
     {
+        'text/csv',
+        'application/csv',
+        'text/x-comma-separated-values',
+        'text/tab-separated-values',
+        'application/vnd.ms-excel',
+        'application/msexcel',
+        'application/x-msexcel',
+        'application/x-ms-excel',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'application/vnd.ms-excel.sheet.macroenabled.12',
+        'application/vnd.ms-excel.sheet.binary.macroenabled.12',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.template',
+        'application/vnd.ms-excel.template.macroenabled.12',
+        'application/vnd.ms-excel.addin.macroenabled.12',
+        'application/vnd.oasis.opendocument.spreadsheet',
+        'application/vnd.oasis.opendocument.spreadsheet-template',
+        'application/vnd.apple.numbers',
+        'application/x-iwork-numbers-sffnumbers',
         'application/vnd.google-earth.kml+xml',
         'application/vnd.google-earth.kmz',
         'application/gpx+xml',
@@ -143,6 +179,7 @@ def skip_extraction_stub(filename: str, file_id: str, reason: str) -> str:
         f'[Skipped text extraction]\n'
         f'{name} is stored as the original blob (id {file_id}). '
         f'Tika/embeddings are skipped ({reason}): the extracted bytes would be '
-        f'coordinates, meshes, or columnar binary, not searchable text. '
+        f'structured/tabular data, coordinates, meshes, or binary arrays rather '
+        f'than useful searchable text. '
         f'Use python against the original file.'
     )
