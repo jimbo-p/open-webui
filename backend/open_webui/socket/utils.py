@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import time
 import uuid
 
 import pycrdt as Y
@@ -71,35 +70,16 @@ class RedisLock:
 
 
 class RedisDict:
-    # Contents and fingerprint must be written together, or a stale fingerprint suppresses the repair.
-    _SET_SCRIPT = """
-    local wanted = {}
-    for i = 2, #ARGV, 2 do
-        wanted[ARGV[i]] = true
-        redis.call('hset', KEYS[1], ARGV[i], ARGV[i + 1])
-    end
-    for _, field in ipairs(redis.call('hkeys', KEYS[1])) do
-        if not wanted[field] then
-            redis.call('hdel', KEYS[1], field)
-        end
-    end
-    -- Expiring forces a rewrite every 5 min, repairing a hash damaged outside this script.
-    redis.call('set', KEYS[2], ARGV[1], 'EX', 300)
-    """
-
     def __init__(
         self,
         name,
         redis_url,
         redis_sentinels=[],
         redis_cluster=False,
-        cache_set_signature=True,
+        cache_set_signature=False,
     ):
         self.name = name
-        # Both keys must share a cluster slot: reuse the name's hash tag, or wrap it to make one.
-        tag_open = name.find('{')
-        is_tagged = tag_open != -1 and name.find('}', tag_open + 1) > tag_open + 1
-        self._signature_name = f'{name}:signature' if is_tagged else f'{{{name}}}:signature'
+        self._signature_name = f'{name}:signature' if cache_set_signature else None
         self.redis = get_redis_connection(
             redis_url,
             redis_sentinels,
@@ -157,13 +137,11 @@ class RedisDict:
             self.redis.hdel(self.name, *keys)
             if self._signature_name:
                 self.redis.delete(self._signature_name)
-    discard = delete_many
 
-    def set(self, mapping: dict) -> bool:
-        """Replace the hash contents. False when the payload already matches Redis."""
+    def set(self, mapping: dict):
         if not mapping:
             self.clear()
-            return True
+            return
 
         # Serialize values once — reused for both the fingerprint and the write.
         serialized = {k: JSONCodec.dumps(v) for k, v in mapping.items()}
@@ -175,15 +153,29 @@ class RedisDict:
             digest.update(b'\0')
         content_digest = digest.hexdigest()
 
-        # Fast path: skip sending the payload when the hash already holds it; a lost race self-heals.
-        if self.redis.get(self._signature_name) == content_digest and self.redis.exists(self.name):
-            return False
+        if self._signature_name:
+            stored_signature = self.redis.get(self._signature_name)
+            if stored_signature and stored_signature.startswith(f'{content_digest}:'):
+                return
+            # Cleared first so readers refetch while the hash is being rewritten.
+            self.redis.delete(self._signature_name)
 
-        args = [content_digest]
-        for field, value in serialized.items():
-            args += [field, value]
-        self.redis.eval(self._SET_SCRIPT, 2, self.name, self._signature_name, *args)
-        return True
+        # Fetch existing keys before writing so we know which ones to remove.
+        # HKEYS is cheap — it transfers only short key strings, not large JSON values.
+        existing_keys = set(self.redis.hkeys(self.name))
+        new_keys = set(mapping.keys())
+        keys_to_remove = existing_keys - new_keys
+
+        # HSET first (add/update all new values), then HDEL (remove stale keys).
+        # We never DELETE the whole hash — this eliminates the race window
+        # where concurrent readers would see an empty models dict.
+        self.redis.hset(self.name, mapping=serialized)
+        if keys_to_remove:
+            self.redis.hdel(self.name, *keys_to_remove)
+
+        if self._signature_name:
+            self.redis.set(self._signature_name, f'{content_digest}:{uuid.uuid4().hex}')
+
     def get(self, key, default=None):
         try:
             return self[key]
@@ -191,7 +183,11 @@ class RedisDict:
             return default
 
     def clear(self):
-        self.redis.delete(self.name, self._signature_name)
+        if self._signature_name:
+            self.redis.delete(self.name)
+            self.redis.delete(self._signature_name)
+        else:
+            self.redis.delete(self.name)
 
     def update(self, other=None, **kwargs):
         if other is not None:
@@ -207,78 +203,40 @@ class RedisDict:
 
 
 class CachedRedisDict(RedisDict):
-    """Answers reads from a per-process snapshot, refetched at most once per TTL.
+    """Answers reads from a per-worker cache of the hash, refetched whenever its signature changes."""
 
-    Only for rarely-changing data. Another worker's writes lag by up to the TTL.
-    """
+    def __init__(self, name: str, redis_url: str, redis_sentinels: list = [], redis_cluster: bool = False):
+        super().__init__(name, redis_url, redis_sentinels, redis_cluster, cache_set_signature=True)
+        self._cache: dict = {}
+        self._cached_signature: str | None = None
 
-    TTL_SECONDS = 5
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._cache = {}
-        self._cache_expires_at = 0.0
-
-    def _snapshot(self) -> dict:
-        now = time.monotonic()
-        if now >= self._cache_expires_at:
-            self._cache = {k: JSONCodec.loads(v) for k, v in self.redis.hgetall(self.name).items()}
-            self._cache_expires_at = now + self.TTL_SECONDS
+    def _refresh_cache(self) -> dict:
+        stored_signature = self.redis.get(self._signature_name)
+        if stored_signature is None or stored_signature != self._cached_signature:
+            self._cache = self.redis.hgetall(self.name)
+            self._cached_signature = stored_signature
         return self._cache
 
     def __getitem__(self, key):
-        return self._snapshot()[key]
+        value = self._refresh_cache().get(key)
+        if value is None:
+            raise KeyError(key)
+        return JSONCodec.loads(value)
 
     def __contains__(self, key):
-        return key in self._snapshot()
+        return key in self._refresh_cache()
 
     def __len__(self):
-        return len(self._snapshot())
+        return len(self._refresh_cache())
 
     def keys(self):
-        return list(self._snapshot().keys())
+        return list(self._refresh_cache().keys())
 
     def values(self):
-        return list(self._snapshot().values())
+        return [JSONCodec.loads(v) for v in self._refresh_cache().values()]
 
     def items(self):
-        return list(self._snapshot().items())
-
-    def __setitem__(self, key, value):
-        super().__setitem__(key, value)
-        self._cache_expires_at = 0.0
-
-    def __delitem__(self, key):
-        super().__delitem__(key)
-        self._cache_expires_at = 0.0
-
-    def get(self, key, default=None):
-        return self._snapshot().get(key, default)
-
-    def set(self, mapping: dict) -> bool:
-        # Drop the snapshot rather than seed it from `mapping`: callers keep
-        # mutating those dicts after handing them over.
-        wrote = super().set(mapping)
-        if wrote:
-            self._cache_expires_at = 0.0
-        return wrote
-
-    def delete_many(self, *keys):
-        super().delete_many(*keys)
-        self._cache_expires_at = 0.0
-
-    def update(self, other=None, **kwargs):
-        super().update(other, **kwargs)
-        self._cache_expires_at = 0.0
-
-    def setdefault(self, key, default=None):
-        value = super().setdefault(key, default)
-        self._cache_expires_at = 0.0
-        return value
-
-    def clear(self):
-        super().clear()
-        self._cache_expires_at = 0.0
+        return [(k, JSONCodec.loads(v)) for k, v in self._refresh_cache().items()]
 
 
 def _append_prosemirror_nodes(parent, nodes) -> None:

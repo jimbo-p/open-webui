@@ -344,12 +344,10 @@ def get_session_ids_from_room(room):
     return list(members) if members else []
 
 
-async def get_session_ids_by_user_id(user_id: str) -> list[str]:
+def get_session_ids_by_user_id(user_id: str) -> list[str]:
     """Get known session IDs for a user across the local rooms and shared session pool."""
     session_ids = set(get_session_ids_from_room(f'user:{user_id}'))
-    for batch in session_pool_batches():
-        session_ids.update(sid for sid, entry in batch if entry.get('id') == user_id)
-        await asyncio.sleep(0)  # don't hold the loop for the whole pool
+    session_ids.update(sid for sid, entry in SESSION_POOL.items() if entry and entry.get('id') == user_id)
     return list(session_ids)
 
 
@@ -398,7 +396,7 @@ async def disconnect_user_sessions(user_id: str):
     The client will automatically reconnect and re-authenticate with
     fresh data from the database.
     """
-    session_ids = await get_session_ids_by_user_id(user_id)
+    session_ids = get_session_ids_by_user_id(user_id)
     for sid in session_ids:
         try:
             await sio.disconnect(sid)
@@ -960,23 +958,22 @@ async def yjs_awareness_update(sid, data):
 
 @sio.event
 async def disconnect(sid, reason=None):
-    try:
+    if sid in SESSION_POOL:
         del SESSION_POOL[sid]
-    except KeyError:
-        pass
 
-    for model_id, connections in list(USAGE_POOL.items()):
-        if sid in connections:
-            del connections[sid]
-            if not connections:
-                try:
+        # Clean up USAGE_POOL entries for this session
+        for model_id, connections in list(USAGE_POOL.items()):
+            if sid in connections:
+                del connections[sid]
+                if not connections:
                     del USAGE_POOL[model_id]
-                except KeyError:
-                    pass
-            else:
-                USAGE_POOL[model_id] = connections
+                else:
+                    USAGE_POOL[model_id] = connections
 
-    await YDOC_MANAGER.remove_user_from_all_documents(sid)
+        await YDOC_MANAGER.remove_user_from_all_documents(sid)
+    else:
+        pass
+        # print(f"Unknown session ID {sid} disconnected")
 
 
 async def redis_event_listener() -> None:

@@ -248,7 +248,7 @@ from open_webui.utils.middleware import (
     process_chat_payload,
     process_chat_response,
 )
-from open_webui.utils.misc import get_response_error_detail, merge_model_params, normalize_tags
+from open_webui.utils.misc import get_response_error_detail, merge_model_params
 from open_webui.utils.model_ids import strip_provider_model_prefix
 from open_webui.utils.models import (
     check_model_access,

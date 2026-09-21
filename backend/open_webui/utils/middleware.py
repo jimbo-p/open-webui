@@ -62,7 +62,6 @@ from open_webui.routers.images import (
 )
 from open_webui.routers.pipelines import (
     get_sorted_filters,
-    has_pipeline_outlet_filters,
     process_pipeline_inlet_filter,
     process_pipeline_outlet_filter,
 )
@@ -4091,8 +4090,12 @@ async def outlet_filter_handler(ctx):
         filter_functions = (
             await get_filter_functions(request, model, metadata.get('filter_ids', [])) if ENABLE_PLUGINS else []
         )
-        # Nothing can modify the messages: skip the pass
-        if not filter_functions and not has_pipeline_outlet_filters(model, request.app.state.MODELS):
+        model_id = model.get('id') if isinstance(model, dict) else model
+        models = request.app.state.MODELS
+        has_pipeline_outlet_filters = bool(
+            (isinstance(model, dict) and 'pipeline' in model) or get_sorted_filters(model_id, models)
+        )
+        if not filter_functions and not has_pipeline_outlet_filters:
             return
 
         messages_map = None
@@ -4484,6 +4487,7 @@ async def streaming_chat_response_handler(response, ctx):
             tag_scan_positions = {}
             tag_boundary_positions = {}
             response_stream_task_id = metadata.get('task_id') or metadata.get('message_id')
+            response_stream_state = {}
 
             def tag_output_handler(content_type, tags, output):
                 """
@@ -4984,6 +4988,7 @@ async def streaming_chat_response_handler(response, ctx):
                             if continuing
                             else joined_content or get_output_text(current_stream_output),
                             current_stream_output,
+                            response_stream_state,
                         )
 
                     def get_response_delta_key(delta_data: dict):

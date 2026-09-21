@@ -1,13 +1,4 @@
-"""Per-room channel delivery for the socket.io Redis manager, enabled with
-WEBSOCKET_REDIS_ROOM_CHANNELS=true.
-
-Room-targeted emits are published on a per-room channel instead of the shared
-one; every instance holds one static pattern subscription covering all room
-channels and drops messages for rooms without local members by channel name,
-before decoding the payload. Acks, control messages and non-str room emits
-stay on the shared channel. All instances sharing a channel must run the same
-mode.
-"""
+"""Per-room redis channels let instances skip the decode and packet encode for rooms with no local members."""
 
 import asyncio
 
@@ -25,7 +16,6 @@ class AsyncRedisRoomChannelManager(AsyncRedisManager):
     def _room_channel(self, namespace, room):
         return f'{self.channel}#{namespace}#{room}'.encode()
 
-    # every local membership change funnels through these two hooks
     def basic_enter_room(self, sid, namespace, room, eio_sid=None):
         super().basic_enter_room(sid, namespace, room, eio_sid=eio_sid)
         if room is not None:
@@ -37,7 +27,6 @@ class AsyncRedisRoomChannelManager(AsyncRedisManager):
             self._local_room_channels.discard(self._room_channel(namespace, room))
 
     async def _publish(self, data):
-        # stock copy (5.16) with the channel made variable; re-check on upgrades
         if data.get('method') == 'emit' and isinstance(data.get('room'), str):
             channel = self._room_channel(data['namespace'], data['room'])
         else:
@@ -50,9 +39,7 @@ class AsyncRedisRoomChannelManager(AsyncRedisManager):
                 return await self.redis.publish(channel, self.json.dumps(data))
             except error as exc:
                 if retries_left > 0:
-                    self._get_logger().error(
-                        'Cannot publish to redis... retrying', extra={'redis_exception': str(exc)}
-                    )
+                    self._get_logger().error('Cannot publish to redis... retrying', extra={'redis_exception': str(exc)})
                     self.connected = False
                 else:
                     self._get_logger().error(
@@ -61,7 +48,6 @@ class AsyncRedisRoomChannelManager(AsyncRedisManager):
                     break
 
     async def _redis_listen_with_retries(self):
-        # stock copy (5.16) with the room pattern subscribe added; re-check on upgrades
         _, error = self._get_redis_module_and_error()
         retry_sleep = 1
         subscribed = False

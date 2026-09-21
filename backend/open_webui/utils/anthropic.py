@@ -879,14 +879,13 @@ async def openai_stream_to_anthropic_stream(openai_stream_generator, model: str 
                                 yield f'event: content_block_delta\ndata: {JSONCodec.dumps(block_delta)}\n\n'.encode()
 
                             # Close the block once arguments form complete JSON
-                            buffered = tool['arguments']
                             if (
                                 tool['started']
                                 and not tool['stopped']
-                                and (buffered.rstrip()[-1:] == '}' or buffered.lstrip()[:1] != '{')
+                                and (tool['arguments'].rstrip()[-1:] == '}' or tool['arguments'].lstrip()[:1] != '{')
                             ):
                                 try:
-                                    JSONCodec.loads(buffered)
+                                    JSONCodec.loads(tool['arguments'])
                                     tool['stopped'] = True
                                     block_stop = {
                                         'type': 'content_block_stop',

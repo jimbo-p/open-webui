@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from copy import deepcopy
 from typing import Any, ClassVar
 
 from fastapi.encoders import jsonable_encoder
@@ -97,6 +96,15 @@ def _assign_path(target: dict, path: list[str], value: Any) -> None:
 
 def _json_value(value: Any) -> Any:
     return jsonable_encoder(value)
+
+
+def _copied(value: Any) -> Any:
+    """Independent copy for callers that mutate what they read; snapshot values are JSON, so only dict and list nest."""
+    if isinstance(value, dict):
+        return {key: _copied(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_copied(item) for item in value]
+    return value
 
 
 # Bumped by every write, which is what retires a snapshot taken before it.
@@ -198,8 +206,7 @@ class Config(Base):
                 row = await db.get(Config, key)
                 return row.value if row else Config.default_value(key, default)
         values = await _persisted_config()
-        # Callers mutate what they read, so hand out a copy.
-        return deepcopy(values[key]) if key in values else Config.default_value(key, default)
+        return _copied(values[key]) if key in values else Config.default_value(key, default)
 
     @staticmethod
     async def get_many(*keys: str) -> dict:

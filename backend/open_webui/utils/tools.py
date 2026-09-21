@@ -38,7 +38,6 @@ from open_webui.env import (
     FORWARD_SESSION_INFO_HEADER_CHAT_ID,
     FORWARD_SESSION_INFO_HEADER_MESSAGE_ID,
     REDIS_KEY_PREFIX,
-    TOOL_SERVERS_CACHE_TTL,
 )
 from open_webui.models.access_grants import AccessGrants
 from open_webui.models.config import Config
@@ -1170,55 +1169,22 @@ def convert_openapi_to_tool_payload(openapi_spec):
     return tool_payload
 
 
-def _enabled_openapi_connections(connections: list[dict] | None) -> bool:
-    return any(
-        connection.get('config', {}).get('enable') and connection.get('type', 'openapi') == 'openapi'
-        for connection in (connections or [])
-    )
-
-
-def _enabled_terminal_connections(connections: list[dict] | None) -> bool:
-    return any(connection.get('url') and connection.get('enabled', True) for connection in (connections or []))
-
-
-def _in_memory_servers(request: Request, attr: str) -> list:
-    return getattr(request.app.state, attr, None) or []
-
-
-async def _write_server_cache(redis, key: str, payload: list) -> None:
-    kwargs = {'ex': TOOL_SERVERS_CACHE_TTL} if TOOL_SERVERS_CACHE_TTL > 0 else {}
-    await redis.set(key, JSONCodec.dumps(payload), **kwargs)
-
-
 async def set_tool_servers(request: Request):
-    connections = await Config.get('tool_server.connections', []) or []
-    previous = _in_memory_servers(request, 'TOOL_SERVERS')
     try:
-        fetched = await get_tool_servers_data(connections)
+        request.app.state.TOOL_SERVERS = await get_tool_servers_data(await Config.get('tool_server.connections', []))
     except Exception as e:
         log.error(f'Error fetching tool server data: {e}')
-        fetched = None
+        request.app.state.TOOL_SERVERS = getattr(request.app.state, 'TOOL_SERVERS', None) or []
 
-    if fetched is None or (_enabled_openapi_connections(connections) and not fetched):
-        if previous:
-            log.warning(
-                'Keeping last-known-good tool_servers (%s); refresh %s',
-                len(previous),
-                'failed' if fetched is None else 'returned empty',
-            )
-            request.app.state.TOOL_SERVERS = previous
-            return previous
-        request.app.state.TOOL_SERVERS = []
-        return []
-
-    request.app.state.TOOL_SERVERS = fetched
     try:
         if request.app.state.redis is not None:
-            await _write_server_cache(request.app.state.redis, f'{REDIS_KEY_PREFIX}:tool_servers', fetched)
+            await request.app.state.redis.set(
+                f'{REDIS_KEY_PREFIX}:tool_servers', JSONCodec.dumps(request.app.state.TOOL_SERVERS)
+            )
     except Exception as e:
         log.error(f'Error caching tool_servers to Redis: {e}')
 
-    return fetched
+    return request.app.state.TOOL_SERVERS
 
 
 async def get_tool_servers(request: Request):
@@ -1229,17 +1195,9 @@ async def get_tool_servers(request: Request):
                 data = await request.app.state.redis.get(f'{REDIS_KEY_PREFIX}:tool_servers')
                 if data is not None:
                     tool_servers = JSONCodec.loads(data)
-                    if not tool_servers and _enabled_openapi_connections(
-                        await Config.get('tool_server.connections', []) or []
-                    ):
-                        tool_servers = None
-                    else:
-                        request.app.state.TOOL_SERVERS = tool_servers
+                    request.app.state.TOOL_SERVERS = tool_servers
             except Exception as e:
                 log.error(f'Error fetching tool_servers from Redis: {e}')
-                cached = _in_memory_servers(request, 'TOOL_SERVERS')
-                if cached:
-                    return cached
 
         if tool_servers is None:
             tool_servers = await set_tool_servers(request)
@@ -1247,7 +1205,7 @@ async def get_tool_servers(request: Request):
         return tool_servers
     except Exception as e:
         log.error(f'Failed to load tool servers, skipping: {e}')
-        return _in_memory_servers(request, 'TOOL_SERVERS')
+        return getattr(request.app.state, 'TOOL_SERVERS', None) or []
 
 
 async def get_terminal_cwd(
@@ -1343,26 +1301,7 @@ async def set_terminal_servers(request: Request):
             }
         )
 
-    previous = _in_memory_servers(request, 'TERMINAL_SERVERS')
-    try:
-        fetched = await get_tool_servers_data(server_configs)
-    except Exception as e:
-        log.error(f'Error fetching terminal server data: {e}')
-        fetched = None
-
-    if fetched is None or (_enabled_terminal_connections(connections) and not fetched):
-        if previous:
-            log.warning(
-                'Keeping last-known-good terminal_servers (%s); refresh %s',
-                len(previous),
-                'failed' if fetched is None else 'returned empty',
-            )
-            request.app.state.TERMINAL_SERVERS = previous
-            return previous
-        request.app.state.TERMINAL_SERVERS = []
-        return []
-
-    request.app.state.TERMINAL_SERVERS = fetched
+    request.app.state.TERMINAL_SERVERS = await get_tool_servers_data(server_configs)
 
     # Fetch system prompts concurrently (runs at cache time, not per-request)
     connections_by_id = {c.get('id'): c for c in connections if c.get('id')}
@@ -1385,13 +1324,10 @@ async def set_terminal_servers(request: Request):
         return_exceptions=True,
     )
 
-    try:
-        if request.app.state.redis is not None:
-            await _write_server_cache(
-                request.app.state.redis, f'{REDIS_KEY_PREFIX}:terminal_servers', request.app.state.TERMINAL_SERVERS
-            )
-    except Exception as e:
-        log.error(f'Error caching terminal_servers to Redis: {e}')
+    if request.app.state.redis is not None:
+        await request.app.state.redis.set(
+            f'{REDIS_KEY_PREFIX}:terminal_servers', JSONCodec.dumps(request.app.state.TERMINAL_SERVERS)
+        )
 
     return request.app.state.TERMINAL_SERVERS
 
@@ -1404,17 +1340,15 @@ async def get_terminal_servers(request: Request):
             data = await request.app.state.redis.get(f'{REDIS_KEY_PREFIX}:terminal_servers')
             if data is not None:
                 terminal_servers = JSONCodec.loads(data)
-                if terminal_servers or not _enabled_terminal_connections(
-                    await Config.get('terminal_server.connections', []) or []
+                connections = await Config.get('terminal_server.connections', []) or []
+                if terminal_servers or not any(
+                    connection.get('url') and connection.get('enabled', True) for connection in connections
                 ):
                     request.app.state.TERMINAL_SERVERS = terminal_servers
                 else:
                     terminal_servers = None
         except Exception as e:
-            log.error(f'Error reading terminal_servers from Redis: {e}')
-            cached = _in_memory_servers(request, 'TERMINAL_SERVERS')
-            if cached:
-                return cached
+            log.error(f'Error fetching terminal_servers from Redis: {e}')
 
     if terminal_servers is None:
         terminal_servers = await set_terminal_servers(request)
@@ -1452,6 +1386,10 @@ async def get_terminal_tools(
     # Find the cached spec data for this terminal
     terminal_servers = await get_terminal_servers(request)
     server_data = next((server for server in terminal_servers if server.get('id') == terminal_id), None)
+    if server_data is None:
+        # An earlier failed spec fetch is cached as an absence, so rebuild once before giving up.
+        terminal_servers = await set_terminal_servers(request)
+        server_data = next((server for server in terminal_servers if server.get('id') == terminal_id), None)
     if server_data is None:
         raise RuntimeError(f"Terminal server '{terminal_id}' is unavailable")
 
