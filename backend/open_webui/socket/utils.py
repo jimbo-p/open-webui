@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 import uuid
 
@@ -11,6 +12,9 @@ import pycrdt as Y
 from open_webui.env import REDIS_KEY_PREFIX
 from open_webui.utils.json_codec import JSONCodec
 from open_webui.utils.redis import get_redis_connection
+from redis.exceptions import RedisClusterException, RedisError
+
+log = logging.getLogger(__name__)
 
 YDOC_KEY_PREFIX = f'{REDIS_KEY_PREFIX}:ydoc:documents'
 SCAN_BATCH_SIZE = 200
@@ -60,7 +64,10 @@ class RedisLock:
         return bool(self.redis.eval(self._RENEW_SCRIPT, 1, self.lock_name, self.lock_id, self.timeout_secs))
 
     def release_lock(self):
-        self.redis.eval(self._RELEASE_SCRIPT, 1, self.lock_name, self.lock_id)
+        try:
+            self.redis.eval(self._RELEASE_SCRIPT, 1, self.lock_name, self.lock_id)
+        except (RedisClusterException, RedisError) as e:
+            log.warning('Failed to release lock %s; it expires on its own: %s', self.lock_name, e)
 
 
 class RedisDict:
@@ -150,7 +157,6 @@ class RedisDict:
             self.redis.hdel(self.name, *keys)
             if self._signature_name:
                 self.redis.delete(self._signature_name)
-
     discard = delete_many
 
     def set(self, mapping: dict) -> bool:
@@ -167,18 +173,17 @@ class RedisDict:
             digest.update(b'\0')
             digest.update(serialized[key].encode())
             digest.update(b'\0')
-        signature = digest.hexdigest()
+        content_digest = digest.hexdigest()
 
         # Fast path: skip sending the payload when the hash already holds it; a lost race self-heals.
-        if self.redis.get(self._signature_name) == signature and self.redis.exists(self.name):
+        if self.redis.get(self._signature_name) == content_digest and self.redis.exists(self.name):
             return False
 
-        args = [signature]
+        args = [content_digest]
         for field, value in serialized.items():
             args += [field, value]
         self.redis.eval(self._SET_SCRIPT, 2, self.name, self._signature_name, *args)
         return True
-
     def get(self, key, default=None):
         try:
             return self[key]
