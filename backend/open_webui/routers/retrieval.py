@@ -386,7 +386,6 @@ RETRIEVAL_CONFIG_KEYS = {
     'STAAN_MARKET': 'web.search.staan_market',
     'STAAN_MAX_SNIPPETS': 'web.search.staan_max_snippets',
     'TAVILY_API_KEY': 'web.search.tavily_api_key',
-    'TAVILY_API_BASE_URL': 'web.search.tavily_api_base_url',
     'TAVILY_EXTRACT_DEPTH': 'web.search.tavily_extract_depth',
     'TEXT_SPLITTER': 'rag.text_splitter',
     'TIKA_SERVER_URL': 'rag.tika_server_url',
@@ -743,7 +742,6 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
             'SERPLY_API_KEY': config.SERPLY_API_KEY,
             'DDGS_BACKEND': config.DDGS_BACKEND,
             'TAVILY_API_KEY': config.TAVILY_API_KEY,
-            'TAVILY_API_BASE_URL': config.TAVILY_API_BASE_URL,
             'STAAN_API_KEY': config.STAAN_API_KEY,
             'STAAN_MARKET': config.STAAN_MARKET,
             'STAAN_MAX_SNIPPETS': config.STAAN_MAX_SNIPPETS,
@@ -827,7 +825,6 @@ class WebConfig(BaseModel):
     SERPLY_API_KEY: str | None = None
     DDGS_BACKEND: str | None = None
     TAVILY_API_KEY: str | None = None
-    TAVILY_API_BASE_URL: str | None = None
     STAAN_API_KEY: str | None = None
     STAAN_MARKET: str | None = None
     STAAN_MAX_SNIPPETS: int | None = None
@@ -1351,7 +1348,6 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         config.SERPLY_API_KEY = form_data.web.SERPLY_API_KEY
         config.DDGS_BACKEND = form_data.web.DDGS_BACKEND
         config.TAVILY_API_KEY = form_data.web.TAVILY_API_KEY
-        config.TAVILY_API_BASE_URL = form_data.web.TAVILY_API_BASE_URL
         config.STAAN_API_KEY = form_data.web.STAAN_API_KEY
         config.STAAN_MARKET = form_data.web.STAAN_MARKET
         config.STAAN_MAX_SNIPPETS = form_data.web.STAAN_MAX_SNIPPETS
@@ -1508,7 +1504,6 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
             'SERPHOUSE_DOMAIN': config.SERPHOUSE_DOMAIN,
             'SERPLY_API_KEY': config.SERPLY_API_KEY,
             'TAVILY_API_KEY': config.TAVILY_API_KEY,
-            'TAVILY_API_BASE_URL': config.TAVILY_API_BASE_URL,
             'STAAN_API_KEY': config.STAAN_API_KEY,
             'STAAN_MARKET': config.STAAN_MARKET,
             'STAAN_MAX_SNIPPETS': config.STAAN_MAX_SNIPPETS,
@@ -2746,7 +2741,6 @@ async def search_web(request: Request, engine: str, query: str, user=None) -> li
                 query,
                 config.WEB_SEARCH_RESULT_COUNT,
                 config.WEB_SEARCH_DOMAIN_FILTER_LIST,
-                api_base_url=config.TAVILY_API_BASE_URL,
             )
         else:
             raise Exception('No TAVILY_API_KEY found in environment variables')
@@ -3195,47 +3189,41 @@ async def query_collection_handler(
 
     try:
         if config.ENABLE_RAG_HYBRID_SEARCH and (form_data.hybrid is None or form_data.hybrid):
-            try:
-                return await query_collection_with_hybrid_search(
-                    collection_names=form_data.collection_names,
-                    queries=[form_data.query],
-                    embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
-                        query, prefix=prefix, user=user
-                    ),
-                    k=form_data.k if form_data.k else config.TOP_K,
-                    reranking_function=(
-                        (lambda query, documents: request.app.state.RERANKING_FUNCTION(query, documents, user=user))
-                        if request.app.state.RERANKING_FUNCTION
-                        else None
-                    ),
-                    k_reranker=form_data.k_reranker or config.TOP_K_RERANKER,
-                    r=(form_data.r if form_data.r else config.RELEVANCE_THRESHOLD),
-                    hybrid_bm25_weight=(
-                        form_data.hybrid_bm25_weight
-                        if form_data.hybrid_bm25_weight is not None
-                        else config.HYBRID_BM25_WEIGHT
-                    ),
-                    enable_enriched_texts=(
-                        form_data.enable_enriched_texts
-                        if form_data.enable_enriched_texts is not None
-                        else config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS
-                    ),
-                )
-            except Exception as hybrid_exc:
-                log.warning(
-                    'Hybrid search failed for /query/collection, falling back to vector-only search: %s',
-                    hybrid_exc,
-                )
-
-        return await query_collection(
-            request,
-            collection_names=form_data.collection_names,
-            queries=[form_data.query],
-            embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
-                query, prefix=prefix, user=user
-            ),
-            k=form_data.k if form_data.k else config.TOP_K,
-        )
+            return await query_collection_with_hybrid_search(
+                collection_names=form_data.collection_names,
+                queries=[form_data.query],
+                embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
+                    query, prefix=prefix, user=user
+                ),
+                k=form_data.k if form_data.k else config.TOP_K,
+                reranking_function=(
+                    (lambda query, documents: request.app.state.RERANKING_FUNCTION(query, documents, user=user))
+                    if request.app.state.RERANKING_FUNCTION
+                    else None
+                ),
+                k_reranker=form_data.k_reranker or config.TOP_K_RERANKER,
+                r=(form_data.r if form_data.r else config.RELEVANCE_THRESHOLD),
+                hybrid_bm25_weight=(
+                    form_data.hybrid_bm25_weight
+                    if form_data.hybrid_bm25_weight is not None
+                    else config.HYBRID_BM25_WEIGHT
+                ),
+                enable_enriched_texts=(
+                    form_data.enable_enriched_texts
+                    if form_data.enable_enriched_texts is not None
+                    else config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS
+                ),
+            )
+        else:
+            return await query_collection(
+                request,
+                collection_names=form_data.collection_names,
+                queries=[form_data.query],
+                embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
+                    query, prefix=prefix, user=user
+                ),
+                k=form_data.k if form_data.k else config.TOP_K,
+            )
 
     except HTTPException:
         raise

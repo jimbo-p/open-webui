@@ -8,8 +8,6 @@ from open_webui.env import TAVILY_API_BASE_URL
 
 log = logging.getLogger(__name__)
 
-DEFAULT_TAVILY_API_BASE_URL = 'https://api.tavily.com'
-
 
 class TavilyLoader(BaseLoader):
     """Extract web page content from URLs using Tavily Extract API.
@@ -21,7 +19,6 @@ class TavilyLoader(BaseLoader):
         urls: URL or list of URLs to extract content from.
         api_key: The Tavily API key.
         extract_depth: Depth of extraction, either "basic" or "advanced".
-        api_base_url: Base URL of the Tavily API, for self-hosted or proxied endpoints.
         continue_on_failure: Whether to continue if extraction of a URL fails.
     """
 
@@ -30,7 +27,6 @@ class TavilyLoader(BaseLoader):
         urls: Union[str, List[str]],
         api_key: str,
         extract_depth: Literal['basic', 'advanced'] = 'basic',
-        api_base_url: str = DEFAULT_TAVILY_API_BASE_URL,
         continue_on_failure: bool = True,
     ) -> None:
         """Initialize Tavily Extract client.
@@ -44,7 +40,6 @@ class TavilyLoader(BaseLoader):
                 embedded content, with higher success but may increase latency.
                 basic costs 1 credit per 5 successful URL extractions,
                 advanced costs 2 credits per 5 successful URL extractions.
-            api_base_url: Base URL of the Tavily API, for self-hosted or proxied endpoints.
             continue_on_failure: Whether to continue if extraction of a URL fails.
         """
         if not urls:
@@ -54,7 +49,7 @@ class TavilyLoader(BaseLoader):
         self.urls = urls if isinstance(urls, list) else [urls]
         self.extract_depth = extract_depth
         self.continue_on_failure = continue_on_failure
-        self.api_url = f'{(api_base_url or TAVILY_API_BASE_URL).rstrip("/")}/extract'
+        self.api_url = f'{TAVILY_API_BASE_URL}/extract'
 
     def lazy_load(self) -> Iterator[Document]:
         """Extract and yield documents from the URLs using Tavily Extract API."""

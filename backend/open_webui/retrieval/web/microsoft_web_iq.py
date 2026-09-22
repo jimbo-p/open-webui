@@ -4,7 +4,6 @@ import logging
 from urllib.parse import urlparse
 
 import requests
-from open_webui.retrieval.loaders.microsoft_web_iq import DEFAULT_MICROSOFT_WEB_IQ_API_BASE_URL
 from open_webui.retrieval.web.main import SearchResult, get_filtered_results
 from open_webui.utils.headers import include_user_info_headers
 
@@ -21,7 +20,7 @@ def search_microsoft_web_iq(
     user=None,
 ) -> list[SearchResult]:
     try:
-        api_base_url = (api_base_url or DEFAULT_MICROSOFT_WEB_IQ_API_BASE_URL).rstrip('/')
+        api_base_url = api_base_url.rstrip('/')
         headers = {
             'host': urlparse(api_base_url).netloc or 'api.microsoft.ai',
             'x-apikey': api_key,

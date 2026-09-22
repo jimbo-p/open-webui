@@ -1300,8 +1300,6 @@ SOUGOU_API_SK = os.getenv('SOUGOU_API_SK', '')
 
 TAVILY_API_KEY = os.getenv('TAVILY_API_KEY', '')
 
-TAVILY_API_BASE_URL = os.getenv('TAVILY_API_BASE_URL', 'https://api.tavily.com')
-
 TAVILY_EXTRACT_DEPTH = os.getenv('TAVILY_EXTRACT_DEPTH', 'basic')
 
 STAAN_API_KEY = os.getenv('STAAN_API_KEY', '')
@@ -2999,7 +2997,6 @@ DEFAULT_CONFIG = {
     'web.search.sougou_api_sid': SOUGOU_API_SID,
     'web.search.sougou_api_sk': SOUGOU_API_SK,
     'web.search.tavily_api_key': TAVILY_API_KEY,
-    'web.search.tavily_api_base_url': TAVILY_API_BASE_URL,
     'web.search.tavily_extract_depth': TAVILY_EXTRACT_DEPTH,
     'web.search.staan_api_key': STAAN_API_KEY,
     'web.search.staan_market': STAAN_MARKET,
