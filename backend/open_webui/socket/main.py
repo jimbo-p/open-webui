@@ -43,7 +43,14 @@ from open_webui.models.folders import Folders
 from open_webui.models.notes import Notes, NoteUpdateForm
 from open_webui.models.users import UserNameResponse, Users
 from open_webui.socket.redis_room_channels import AsyncRedisRoomChannelManager
-from open_webui.socket.utils import SOCKET_EVENT_LOCKS, CachedRedisDict, RedisDict, RedisLock, YdocManager
+from open_webui.socket.utils import (
+    SOCKET_EVENT_LOCKS,
+    CachedRedisDict,
+    RedisDict,
+    RedisLock,
+    YdocManager,
+    build_prosemirror_update,
+)
 from open_webui.tasks import (
     REDIS_PUBSUB_MAX_RECONNECT_INTERVAL,
     REDIS_PUBSUB_RECONNECT_INTERVAL,
@@ -816,6 +823,7 @@ async def ydoc_document_join(sid, data):
     try:
         document_id = normalize_document_id(data['document_id'])
 
+        note = None
         if document_id.startswith('note:'):
             if user.get('role') != 'admin' and not await has_permission(
                 user.get('id'), 'features.notes', await Config.get('user.permissions')
@@ -861,8 +869,20 @@ async def ydoc_document_join(sid, data):
         active_session_ids = get_session_ids_from_room(f'doc_{document_id}')
 
         # Get the Yjs document state
-        ydoc = Y.Doc()
         updates = await YDOC_MANAGER.get_updates(document_id)
+
+        # Without this a note written outside the editor opens empty, and its first save wins.
+        if not updates and note:
+            try:
+                content = (note.data or {}).get('content') or {}
+                seed_update = build_prosemirror_update(content.get('json'))
+                if seed_update:
+                    await YDOC_MANAGER.append_to_updates(document_id=document_id, update=seed_update)
+                    updates = [seed_update]
+            except Exception:
+                log.exception('Failed to seed document %s from stored note content', document_id)
+
+        ydoc = Y.Doc()
         for update in updates:
             ydoc.apply_update(bytes(update))
 
@@ -1008,14 +1028,14 @@ async def yjs_document_update(sid, data):
                 log.warning(f'User {user.get("id")} does not have write access to note {note_id}. Rejecting update.')
                 return
 
-        update = data.get('update')  # List of bytes from frontend
+        update = data.get('update')  # absent when a client only refreshes the content to be saved
 
         if update:
             user_id = data.get('user_id', sid)
 
             stored = await YDOC_MANAGER.append_to_updates(
                 document_id=document_id,
-                update=update,  # Convert list of bytes to bytes
+                update=update,
             )
             if stored:
                 # Broadcast update to all other users in the document

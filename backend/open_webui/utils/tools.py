@@ -824,11 +824,13 @@ async def get_builtin_tools(
     if is_builtin_tool_enabled('tasks') and is_saved_chat_id(metadata.get('chat_id')):
         builtin_functions.extend([create_tasks, update_task])
 
-    # Automation tools - create and manage scheduled automations from chat
+    # Automation tools - create and manage scheduled automations from chat.
+    # Omit the whole category on scheduled runs so they cannot spawn more automations.
     if (
         is_builtin_tool_enabled('automations')
         and config.get('automations.enable')
         and await has_user_permission('automations')
+        and not metadata.get('automation_id')
     ):
         builtin_functions.extend(
             [create_automation, update_automation, list_automations, toggle_automation, delete_automation]
@@ -1240,7 +1242,8 @@ def convert_openapi_to_tool_payload(openapi_spec):
                         if resolved_schema.get('properties'):
                             tool['parameters']['properties'].update(resolved_schema['properties'])
                             if 'required' in resolved_schema:
-                                tool['parameters']['required'] = list(
+                                # Keep model-facing schemas identical across worker hash seeds.
+                                tool['parameters']['required'] = sorted(
                                     set(tool['parameters']['required'] + resolved_schema['required'])
                                 )
                         elif resolved_schema.get('type') == 'array':
@@ -1483,6 +1486,10 @@ async def get_terminal_tools(
     # Find the cached spec data for this terminal
     terminal_servers = await get_terminal_servers(request)
     server_data = next((server for server in terminal_servers if server.get('id') == terminal_id), None)
+    if server_data is None:
+        # An earlier failed spec fetch is cached as an absence, so rebuild once before giving up.
+        terminal_servers = await set_terminal_servers(request)
+        server_data = next((server for server in terminal_servers if server.get('id') == terminal_id), None)
     if server_data is None:
         raise RuntimeError(f"Terminal server '{terminal_id}' is unavailable")
 
