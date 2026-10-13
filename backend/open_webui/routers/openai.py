@@ -54,6 +54,7 @@ from open_webui.utils.session_pool import (
     get_session,
     stream_wrapper,
 )
+from open_webui.utils.tool_search import apply_native_tool_search
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1507,6 +1508,8 @@ async def generate_chat_completion(
     headers, cookies = await get_headers_and_cookies(request, url, key, api_config, metadata, user=user)
 
     is_responses = api_config.get('api_type') == 'responses'
+    # A WebUI custom parameter, never a provider request parameter.
+    tool_search_mode = payload.pop('tool_search_mode', 'compatibility')
 
     # Explicit continuation keeps llama.cpp from echoing the prefill in streamed replies.
     if (
@@ -1563,6 +1566,11 @@ async def generate_chat_completion(
                 message['content'] = ''.join(
                     part.get('text', '') for part in message['content'] if part.get('type') in ('input_text', 'text')
                 )
+
+    try:
+        apply_native_tool_search(payload, metadata, tool_search_mode, is_responses=is_responses)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
     is_streaming_request = bool(payload.get('stream', False))
     if not is_streaming_request:

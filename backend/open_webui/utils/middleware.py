@@ -145,7 +145,7 @@ from open_webui.utils.task import (
     tools_function_calling_generation_template,
 )
 from open_webui.utils.tool_approval import complete_tool_call, pending_tool_calls
-from open_webui.utils.tool_search import apply_tool_search
+from open_webui.utils.tool_search import add_discovered_tools, apply_tool_search
 from open_webui.utils.tools import (
     connect_mcp_server,
     get_attached_knowledge,
@@ -3384,6 +3384,8 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         )
         await convert_url_images_to_base64(form_data, user=user)
 
+    add_discovered_tools(form_data, metadata)
+
     if ENABLE_FUNCTIONS:
         try:
             form_data, _ = await process_filter_functions(
@@ -6380,6 +6382,7 @@ async def streaming_chat_response_handler(response, ctx):
                                     {'role': 'system', 'content': f'[CONVERSATION SUMMARY]\n{context_summary}'},
                                 )
 
+                        add_discovered_tools(new_form_data, metadata)
                         new_form_data = await convert_url_images_to_base64(new_form_data, user=user)
 
                         if filter_functions:
@@ -6614,6 +6617,7 @@ async def streaming_chat_response_handler(response, ctx):
                                 ],
                             }
 
+                            add_discovered_tools(new_form_data, metadata)
                             if filter_functions:
                                 new_form_data, _ = await process_filter_functions(
                                     request=request,
