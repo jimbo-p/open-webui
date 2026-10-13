@@ -2,6 +2,8 @@
 
 Review date: October 12, 2026 (America/Chicago). Compared the first dev build with upstream `dev` through `93d25dbe3b2f8b3adf651486de08f6bf9d17f05b`, plus the open fixes below. The [0.12.1 release PR #32296](https://github.com/open-webui/open-webui/pull/32296) and [changelog PR #32228](https://github.com/open-webui/open-webui/pull/32228) were still open; no official `v0.12.1` tag existed at review time. This remains 0.12.0 with selected fixes, not the complete unreleased 0.12.1 feature set.
 
+Release source: [tag `oxy-0.12.0-2`](https://github.com/jimbo-p/open-webui/tree/oxy-0.12.0-2), commit `3ece0d4c430ae2290e26950baf081bbe5928ef41`. The successful standard amd64 image contains every functional change below. Subsequent branch commits add documentation, a formatting-only change to the terminal UUID assignment, and an optional frontend build-memory argument; they add no runtime behavior. The release image is retained from that successful build and verified against its exact source hash.
+
 ## Included since the first dev build
 
 | Change | Source | Reason |
@@ -39,7 +41,8 @@ No runtime environment variables, persistent configuration, dependencies, or dat
 - Six regression cases reproduce failures with the previous implementation and pass with the selected fixes.
 - Seven frontend tests pass. Changed frontend files pass formatting checks.
 - Full type checking remains limited by upstream errors: 6,031 errors / 189 warnings versus 6,032 / 189 in build one. Diagnostic comparison found one removed error; one existing error's printed component type gains the new property count, with no new error category.
-- The Docker frontend stage now accepts build-only `FRONTEND_BUILD_MEMORY` (default 8192 MiB). This build uses 4096 MiB after a concurrent local build caused an OS memory kill with the original heap limit; serving-container memory and environment are unchanged.
-- Container identity, runtime checks, image digest, and ECS health results are recorded in `oxygpt/reports/owui-0.12.0-hotfix2-dev-2026-10-12.md` after rollout.
+- The release image built successfully with the original 8192 MiB frontend heap. Later rebuild attempts encountered host memory pressure, a 4096 MiB Node heap limit, and Docker disk exhaustion. The branch adds optional build-only `FRONTEND_BUILD_MEMORY` (default 8192 MiB) for future builds; neither it nor the later formatting changes are required by the verified release artifact. Serving-container memory and environment are unchanged.
+- Packaged Python 3.11 runtime checks pass for exact source identity, corporate CA, deterministic tool schemas, idempotent note seeding, and three note-version restoration permission scenarios (allowed, denied, missing).
+- Image digest and ECS health results are recorded in `oxygpt/reports/owui-0.12.0-hotfix2-dev-2026-10-12.md` after rollout.
 
 User acceptance should focus on a long multi-round tool run crossing the compaction threshold, automation previews, GitHub skill import, version restoration with notes, shared chat edits, knowledge-folder deletion, and temporary-chat follow-ups. Production remains a separate promotion after dev acceptance.
