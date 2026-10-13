@@ -33,7 +33,7 @@ All twelve full upstream commit/PR picks applied without conflicts. Two remainin
 
 ## Configuration and validation
 
-No environment variables, persistent configuration, dependencies, or database migrations change in this update. Existing decisions about Tool Search, MFA, realtime voice and other optional features remain in the [original upgrade audit](oxy-0.12.0-upgrade.md#environment-decisions). The historical full-context branch is outside this upgrade; no user decision is pending for it. The Apps variables in the proposed 0.12.1 release do not apply to this selected-fix build.
+No environment variables, persistent configuration, dependencies, or database migrations change in this update. The live dev task already sets `ENABLE_CONTEXT_COMPACTION=true`; its persisted configuration remains unchanged. Existing decisions about Tool Search, MFA, realtime voice and other optional features remain in the [original upgrade audit](oxy-0.12.0-upgrade.md#environment-decisions). The historical full-context branch is outside this upgrade; no user decision is pending for it. The Apps variables in the proposed 0.12.1 release do not apply to this selected-fix build.
 
 - 45 backend tests pass, including 13 new cases for compaction, timezone-sensitive recurrence, skill archive boundaries, and follow-up generation.
 - Six regression cases reproduce failures with the previous implementation and pass with the selected fixes.
