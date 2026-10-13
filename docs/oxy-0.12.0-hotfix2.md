@@ -33,12 +33,13 @@ All twelve full upstream commit/PR picks applied without conflicts. Two remainin
 
 ## Configuration and validation
 
-No environment variables, persistent configuration, dependencies, or database migrations change in this update. The live dev task already sets `ENABLE_CONTEXT_COMPACTION=true`; its persisted configuration remains unchanged. Existing decisions about Tool Search, MFA, realtime voice and other optional features remain in the [original upgrade audit](oxy-0.12.0-upgrade.md#environment-decisions). The historical full-context branch is outside this upgrade; no user decision is pending for it. The Apps variables in the proposed 0.12.1 release do not apply to this selected-fix build.
+No runtime environment variables, persistent configuration, dependencies, or database migrations change in this update. The live dev task already sets `ENABLE_CONTEXT_COMPACTION=true`; its persisted configuration remains unchanged. Existing decisions about Tool Search, MFA, realtime voice and other optional features remain in the [original upgrade audit](oxy-0.12.0-upgrade.md#environment-decisions). The historical full-context branch is outside this upgrade; no user decision is pending for it. The Apps variables in the proposed 0.12.1 release do not apply to this selected-fix build.
 
 - 45 backend tests pass, including 13 new cases for compaction, timezone-sensitive recurrence, skill archive boundaries, and follow-up generation.
 - Six regression cases reproduce failures with the previous implementation and pass with the selected fixes.
 - Seven frontend tests pass. Changed frontend files pass formatting checks.
 - Full type checking remains limited by upstream errors: 6,031 errors / 189 warnings versus 6,032 / 189 in build one. Diagnostic comparison found one removed error; one existing error's printed component type gains the new property count, with no new error category.
+- The Docker frontend stage now accepts build-only `FRONTEND_BUILD_MEMORY` (default 8192 MiB). This build uses 4096 MiB after a concurrent local build caused an OS memory kill with the original heap limit; serving-container memory and environment are unchanged.
 - Container identity, runtime checks, image digest, and ECS health results are recorded in `oxygpt/reports/owui-0.12.0-hotfix2-dev-2026-10-12.md` after rollout.
 
 User acceptance should focus on a long multi-round tool run crossing the compaction threshold, automation previews, GitHub skill import, version restoration with notes, shared chat edits, knowledge-folder deletion, and temporary-chat follow-ups. Production remains a separate promotion after dev acceptance.

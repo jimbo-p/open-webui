@@ -107,7 +107,7 @@ These are selected from the [official 0.12.0 release](https://github.com/open-we
 - Full frontend type check is not clean upstream: 6,040 errors / 189 warnings on untouched 0.12.0 versus 6,032 errors / 189 warnings on this fork, using the same installed dependencies. A diagnostic comparison found no introduced errors and eight removed errors. This does not substitute for a clean upstream type check.
 - The standard amd64 container builds successfully and imports the tool converter, MCP client and config model under its Python 3.11 runtime. Final image digest and deployment checks are recorded in the deployment report in `oxygpt`.
 
-Before production: test corporate sign-in/token renewal; new-chat tool selection after navigation; multiple MCP calls and rich results; approval/continue/cancel; a long run crossing the compaction threshold; scheduled session-auth tools; full-context model knowledge; skipped spreadsheet/GIS uploads; edited knowledge search; externally created notes; and cross-replica live updates. Tool Search should get a separate enabled/disabled comparison if approved for a pilot.
+Before production: test corporate sign-in/token renewal; new-chat tool selection after navigation; multiple MCP calls and rich results; approval/continue/cancel; a long run crossing the compaction threshold; scheduled session-auth tools; model-attached knowledge retrieval; skipped spreadsheet/GIS uploads; edited knowledge search; externally created notes; and cross-replica live updates. Tool Search should get a separate enabled/disabled comparison if approved for a pilot.
 
 ## Migration and rollback constraints
 
