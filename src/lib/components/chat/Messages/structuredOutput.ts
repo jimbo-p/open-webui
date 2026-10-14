@@ -509,10 +509,13 @@ function setPart(
 }
 
 function findOutputItemIndex(output: OutputItem[], item: OutputItem): number {
+	// Type must match: a function_call_output shares its call_id with the
+	// function_call it answers and must not replace it.
 	return output.findIndex(
 		(existing) =>
-			(!!item.id && existing?.id === item.id) ||
-			(!!item.call_id && existing?.type === item.type && existing?.call_id === item.call_id)
+			existing?.type === item.type &&
+			((!!item.id && existing?.id === item.id) ||
+				(!!item.call_id && existing?.call_id === item.call_id))
 	);
 }
 
@@ -568,6 +571,9 @@ export function applyResponseStreamEvent(
 		} else if (outputIndex < nextOutput.length) {
 			nextOutput.splice(outputIndex, 0, item);
 		} else {
+			while (nextOutput.length < outputIndex) {
+				nextOutput.push({ type: 'message', status: 'in_progress', role: 'assistant', content: [] });
+			}
 			nextOutput.push(item);
 		}
 		return nextOutput;
@@ -584,6 +590,9 @@ export function applyResponseStreamEvent(
 		} else if (outputIndex < nextOutput.length) {
 			nextOutput[outputIndex] = item;
 		} else {
+			while (nextOutput.length < outputIndex) {
+				nextOutput.push({ type: 'message', status: 'in_progress', role: 'assistant', content: [] });
+			}
 			nextOutput.push(item);
 		}
 		return nextOutput;
