@@ -1012,7 +1012,7 @@ def get_source_context(sources: list, source_ids: dict = None, include_content: 
                 source_ids[source_id] = len(source_ids) + 1
             src_name = source.get('source', {}).get('name')
             src_type = source.get('source', {}).get('type')
-            src_rid = source.get('source', {}).get('id')
+            src_rid = source.get('source', {}).get('id') if src_type != 'text' else None
             body = doc if include_content else ''
             extra_attrs = ''
             for key, value in filter_source_metadata(meta).items():
@@ -3125,7 +3125,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                         **extra_params,
                         '__model__': models[task_model_id],
                         '__messages__': form_data['messages'],
-                        '__files__': metadata.get('files', []),
+                        '__files__': metadata.get('files') or [],
                     },
                 )
 
@@ -3515,7 +3515,7 @@ async def execute_tool_call(form_data, metadata, event_caller, tool_call):
                 function=tool['callable'],
                 extra_params={
                     '__messages__': form_data.get('messages', []),
-                    '__files__': metadata.get('files', []),
+                    '__files__': metadata.get('files') or [],
                 },
             )
             result = await function(**params)

@@ -485,7 +485,10 @@
 		model = { ...model, ...(isPresetModel(model) ? {} : { base_model_id: null }), ...overrides };
 
 		if (savedModels.find((m: ModelListItem) => m.id === model.id) || isPresetModel(model)) {
-			const res = await updateModelById(localStorage.token, model.id, model).catch((error) => {
+			const res = await updateModelById(localStorage.token, model.id, {
+				...savedModels.find((m: ModelListItem) => m.id === model.id),
+				...model
+			}).catch((error) => {
 				return null;
 			});
 
@@ -506,6 +509,10 @@
 				return null;
 			});
 
+			if (res) {
+				savedModels = [...savedModels, res];
+			}
+
 			if (res && showToast) {
 				toast.success($i18n.t('Model updated successfully'));
 				await init().catch((error) => toast.error(`${error}`));
@@ -515,8 +522,8 @@
 	};
 
 	const toggleModelHandler = async (model) => {
-		if (!Object.keys(model).includes('base_model_id') && !isPresetModel(model)) {
-			await createNewModel(localStorage.token, {
+		if (!savedModels.find((m: ModelListItem) => m.id === model.id) && !isPresetModel(model)) {
+			const res = await createNewModel(localStorage.token, {
 				id: model.id,
 				name: model.name,
 				base_model_id: null,
@@ -527,6 +534,10 @@
 			}).catch((error) => {
 				return null;
 			});
+
+			if (res) {
+				savedModels = [...savedModels, res];
+			}
 		} else {
 			await toggleModelById(localStorage.token, model.id);
 		}
