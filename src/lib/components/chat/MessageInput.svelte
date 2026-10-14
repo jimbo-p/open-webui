@@ -698,6 +698,9 @@
 		view.dispatch(tr);
 
 		await tick();
+		chatInputElement?.setText(prompt);
+
+		await tick();
 		await inputVariableHandler(text);
 		await tick();
 		focus({ preventScroll: true });
@@ -1242,7 +1245,7 @@
 						];
 					} else {
 						const blob = await (await fetch(imageUrl)).blob();
-						const compressedFile = new File([blob], imageFile.name, { type: imageFile.type });
+						const compressedFile = new File([blob], imageFile.name, { type: blob.type });
 
 						uploadFileHandler(compressedFile, false);
 					}
