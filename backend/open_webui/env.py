@@ -499,6 +499,12 @@ WEBSOCKET_REDIS_CLUSTER = os.getenv('WEBSOCKET_REDIS_CLUSTER', str(REDIS_CLUSTER
 # shared-channel-only delivery
 WEBSOCKET_REDIS_ROOM_CHANNELS = os.getenv('WEBSOCKET_REDIS_ROOM_CHANNELS', 'True').lower() == 'true'
 
+# Bound cross-worker staleness while coalescing repeated single-key reads.
+try:
+    CONFIG_CACHE_TTL = max(int(os.getenv('CONFIG_CACHE_TTL', '1')), 1)
+except (ValueError, TypeError):
+    CONFIG_CACHE_TTL = 1
+
 websocket_redis_lock_timeout = os.getenv('WEBSOCKET_REDIS_LOCK_TIMEOUT', '60')
 
 try:
