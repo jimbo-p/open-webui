@@ -15,6 +15,7 @@ Both live environments were running `v0.12.2-oxy2`, digest `sha256:682b6ef9ea90b
 | Native terminal-spec recovery versus new OpenAPI outage recovery | Keep the terminal retry: upstream's new fix covers OpenAPI server discovery, a different cache and path. |
 | Corporate CA/build support and originals-only file handling | Retain. Native extraction policy does not match Oxy's spreadsheet/GIS/CAD/scientific/BI handling. |
 | Config snapshot cache, deterministic collaborative-note seeding, stable OpenAPI required-field order, automation recursion protection | Retain; no equivalent in the release. |
+| Tool credential introspection (`/api/v1/auths/verify`) | Preserve the independently deployed tool-auth fix: API keys and automation credentials can resolve identity without opening a human browser session. |
 | Incremental tool UI notifications, model-input-image exclusion, provider error display, selected-model regeneration, parameterized prompt initialization, document/Markdown/knowledge UI corrections | Retain the portions still missing upstream. Native tool dispatch and provider-history replay remain untouched. |
 
 The [0.12.1 audit](oxy-0.12.1-upgrade.md) documents previously retired backports. They remain retired. This release does not reintroduce the discarded provider/lazy-tool adapter.
@@ -60,6 +61,8 @@ After removal, refresh open browser tabs so cached model metadata cannot reselec
 
 The shared model create/edit component no longer displays the Skills picker or fetches its selection list. The builtin Skills capability remains available for on-demand discovery and loading. Skill management and explicit chat selections remain available. As requested, this is a UI removal without an additional backend policy: imports and restoration of older versions can still carry model skill selections.
 
+The authorized dev cleanup was committed on October 19: eight affected entries are now clear, and zero dev models have selected skills. Backup run `698d8a94-25bd-4203-8fed-17beb36a90e3` has all eight original rows and their new model revisions. Verification confirmed that other model fields, unaffected models, skill definitions, permissions, configuration and previous model history are unchanged. Production's 394 selections remain unchanged; no production cleanup has been applied.
+
 ## Build and rollout
 
 There are no new database schema migrations or Python runtime dependency/startup changes relative to 0.12.2. Schema head remains `0bd252b206fb`. Build from `git -c core.autocrlf=false archive` so Windows line-ending conversion does not invalidate upstream's committed encryption-artifact fingerprints. A plain Git archive also applies the local autocrlf setting. The exact committed bytes pass upstream's verification; no crypto code, artifact or manifest change is needed.
@@ -72,23 +75,27 @@ Production promotion and production skill cleanup remain on hold pending the use
 
 ### Deployed dev candidate
 
-Dev now runs `v0.12.3-oxy1`, image `217589814678.dkr.ecr.us-east-1.amazonaws.com/open-webui@sha256:f11658a9888682dda33a35db35324e6cf3074c5e36efe76d9b1f25693d221990`. Application source is commit `190acf34466a90803cd66fd43673a99bd45d04d9`; later branch changes only record validation. The review is [draft PR #6](https://github.com/jimbo-p/open-webui/pull/6), based on the fork's native `0.12.3` branch.
+Dev now runs `v0.12.3-oxy3`, image `217589814678.dkr.ecr.us-east-1.amazonaws.com/open-webui@sha256:8ce87fcfac408cd79ec9e5ee2ed21239927708722b81a0144bfab7330d49ba65`. Combined source is commit `bb90007918e81c370361055413c0a0948ccdb8a5`. Frontend artifacts were built from `0660ff6dcdeecc465cb6402c834e3566dd57bace`; the only subsequent runtime source change is the tool-auth fix, so the frontend source is identical. Later branch changes only record validation. The review is [draft PR #6](https://github.com/jimbo-p/open-webui/pull/6), based on the fork's native `0.12.3` branch.
 
-Serving task definition is `oxygpt-open-webui-task:426` (two healthy tasks), and ingestion is `oxygpt-open-webui-ingest-task:10` (one healthy task). The deployment changed only the application image in each task definition, restored both autoscaling policies exactly, and preserved existing database configuration and skill selections. Dev's Terraform image pin matches the deployed digest; unrelated pending Terraform edits were preserved and no broad Terraform apply was performed.
+Serving task definition is `oxygpt-open-webui-task:428` (two healthy tasks), and ingestion is `oxygpt-open-webui-ingest-task:11` (one healthy task). Both deployments completed. The task definitions changed only the application image; runtime configuration, task counts and autoscaling are preserved. Existing database configuration and the cleared skill selections are verified. Dev's Terraform image pin matches the deployed digest; unrelated pending Terraform edits were preserved and no broad Terraform apply was performed.
 
-Production remains on serving revision 425 and ingestion revision 8, with its original image. Dev rollback targets are serving revision 424 and ingestion revision 9. Use a coordinated restart for rollback too because the Redis stream formats differ.
+An independent tool-auth workstream deployed a 0.12.3 dev hotfix during this work; the combined image preserves that fix. The same workstream updated production's serving task to revision 429 with a 0.12.2 tool-auth image, digest `sha256:d85748026825709f88bca3d61ee380133bfacb10952f8baa8e5a810c0a75d662`. Production ingestion remains revision 8. This upgrade has not promoted 0.12.3 or modified production selections. The exact deployed production image's package version was verified as 0.12.2.
+
+The immediate dev image rollback targets are serving revision 427 and ingestion revision 10; they share native 0.12.3 Redis encoding. Image rollback does not undo the separately backed-up database cleanup. Any later rollback to 0.12.2 still needs a coordinated restart because the Redis stream formats differ.
 
 ## Validation record
 
 - 48 backend regressions pass in the deployed Python runtime with the candidate source. Includes native Redis append/retry/eviction/TTL, legacy native hash reads, compaction checkpoints and tool dispatcher history.
 - Eight frontend regressions pass, including tool/output identity and prior-round preservation.
 - Eight cleanup tests pass: selective cleanup, immutable old history, exact restoration, rollback-only rehearsal, notification drift, later-edit protection, unexpected global defaults, authorized dev application and production notification enforcement before connecting.
-- Dev database rehearsal changed eight models inside a transaction and rolled it back successfully. No skill cleanup has been committed.
-- The full frontend build and encryption source/artifact checks pass. All 313 packaged backend files and the requirements file match application commit `190acf34466a90803cd66fd43673a99bd45d04d9`; the image contains the new encryption WASM asset.
+- The initial dev database rehearsal rolled back successfully. The subsequently authorized dev apply cleared eight entries; backup rows, linked model revisions and preservation of unrelated data were verified against the committed state. Production still has all 394 selections.
+- The changed editor compiles with no new warnings. The full frontend build and encryption source/artifact checks pass. All 5,681 frontend files exactly match the fresh build; obsolete chunks and picker code are absent. All 313 backend files and requirements match the combined source, including the tool-auth fix.
+- All 20 tool-identity tests pass on the combined source, covering accepted credentials, browser-session separation, invalid/revoked credentials, API-key restrictions and MFA.
 - Private-network dev preflight found zero active tasks and successful ACL dry runs for all four Redis room-channel commands.
 - Live dev HTTP checks passed for health, database health, version/configuration, frontend, authentication, models, skills and tools. All three application tasks run the expected image digest and report healthy.
 - An authenticated WebSocket and temporary native-tool-mode chat with `gpt-6.1-sol-low` completed with the expected response and streaming events. This did not save a conversation or call tools.
-- Existing config hashes, selected-skill hashes and schema head match the pre-deployment snapshot. Production task definitions are unchanged, and both dev autoscaling configurations were restored.
+- Existing config hashes, the empty selected-skill hash and schema head match the post-cleanup/pre-deployment snapshot. Both dev autoscaling configurations are unchanged. The unrelated production task-definition change is recorded above.
 - Startup logs contain no Redis ACL errors or HTTP 5xx. Two tool endpoints still report startup discovery failures (`localhost:8052` and MCPO audio-transcribe's unavailable cached OpenAPI spec); both identical conditions were confirmed in the prior revision 424 logs. Their configuration was preserved.
 - Headless Edge loaded chat, model management and skill management, and opened the workspace search dialog, with no JavaScript errors or failed requests. The rendered skills page was visually inspected.
+- Edge created and edited a temporary agent without the picker, verified the system prompt was preserved and builtin Skills remained enabled, and loaded the Skills workspace without JavaScript errors or failed requests. The temporary agent was deleted; a subsequent database check still found zero dev selections. The create screen was visually inspected.
 - These authenticated checks used a short-lived dev session through the internal ALB. They do not certify a fresh corporate SSO sign-in, multi-user collaboration, every document format, or execution of every connected external tool. Those remain acceptance scope before production; the two pre-existing unavailable tool endpoints are recorded above.
