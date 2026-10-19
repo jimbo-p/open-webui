@@ -3568,6 +3568,7 @@
 		inputFiles: any[],
 		bridgeRequest: { userMessageId: string; modelId: string } | null = null
 	) => {
+		await settingDefaults;
 		const _files = structuredClone(inputFiles);
 
 		chatFiles.push(
@@ -3761,6 +3762,7 @@
 		prompt = '';
 	};
 
+	let awaitingDefaults = false;
 	const submitHandler = async (
 		userPrompt: string,
 		{
@@ -3801,6 +3803,15 @@
 		if (modelCommandMatch) {
 			handleModelCommand(modelCommandMatch[1]?.trim() ?? '');
 			return { status: 'rejected' };
+		}
+
+		// Drop a second send that races this wait, since prompt isn't cleared until after it
+		if (awaitingDefaults) return { status: 'rejected' };
+		awaitingDefaults = true;
+		try {
+			await settingDefaults;
+		} finally {
+			awaitingDefaults = false;
 		}
 
 		if (pendingOAuthTools.length > 0) {
@@ -4587,6 +4598,12 @@
 				scrollToBottom();
 			}
 
+			// Single-model turns follow the current selection; side-by-side turns regenerate the clicked column.
+			const isSideBySideTurn = (userMessage.models ?? selectedModels).length > 1;
+			if (!isSideBySideTurn) {
+				userMessage.models = selectedModels;
+			}
+
 			await sendMessage(history, userMessage.id, {
 				...(suggestionPrompt
 					? {
@@ -4594,9 +4611,8 @@
 							regenerationPrompt: suggestionPrompt
 						}
 					: {}),
-				...((userMessage?.models ?? [...selectedModels]).length > 1
+				...(isSideBySideTurn
 					? {
-							// If multiple models are selected, use the model from the message
 							modelId: message.model,
 							modelIdx: message.modelIdx
 						}

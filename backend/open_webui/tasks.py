@@ -146,9 +146,6 @@ async def cleanup_task(redis, task_id: str, id=None):
     """
     Remove a completed or canceled task from the global `tasks` dictionary.
     """
-    if redis:
-        await redis_cleanup_task(redis, task_id, id)
-
     tasks.pop(task_id, None)  # Remove the task if it exists
     response_streams.pop(task_id, None)
 
@@ -158,6 +155,9 @@ async def cleanup_task(redis, task_id: str, id=None):
         if not item_tasks[id]:  # If no tasks left for this ID, remove the entry
             item_tasks.pop(id, None)
 
+
+    if redis:
+        await redis_cleanup_task(redis, task_id, id)
 
 async def create_task(redis, coroutine, id=None, task_id=None):
     """
