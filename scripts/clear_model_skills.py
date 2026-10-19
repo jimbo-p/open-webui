@@ -16,7 +16,7 @@ import uuid
 
 import boto3
 import psycopg2
-from psycopg2.extras import Json, RealDictCursor
+from psycopg2.extras import RealDictCursor
 
 SELECTED = """CASE WHEN jsonb_typeof(meta::jsonb->'skillIds') = 'array'
     THEN jsonb_array_length(meta::jsonb->'skillIds') > 0 ELSE false END"""
@@ -79,27 +79,34 @@ def clear_selections(conn, actor_email, notified_emails=None):
             run_id text NOT NULL, model_id text NOT NULL, before_row jsonb NOT NULL,
             after_version_id text NOT NULL, actor_id text NOT NULL, created_at bigint NOT NULL,
             restored_at bigint, PRIMARY KEY (run_id,model_id))''')
+        # Copy large model definitions inside PostgreSQL. Sending their full prompts
+        # back over a remote connection can hold the model-edit lock for minutes.
+        cur.execute(f'''INSERT INTO {BACKUP_TABLE}
+            (run_id,model_id,before_row,after_version_id,actor_id,created_at)
+            SELECT %s,m.id,to_jsonb(m),gen_random_uuid()::text,%s,%s
+            FROM model m WHERE {SELECTED}''', (run_id, actor['id'], now))
+        cur.execute(f'''INSERT INTO model_history
+            (id,model_id,parent_id,snapshot,user_id,commit_message,created_at)
+            SELECT b.after_version_id,m.id,m.version_id,
+                jsonb_build_object('name',m.name,'base_model_id',m.base_model_id,
+                    'params',coalesce(nullif(m.params::jsonb,'null'::jsonb),'{{}}'::jsonb),
+                    'meta',m.meta::jsonb - 'skillIds' - 'hidden' - 'chat_variables_schema'),
+                b.actor_id,'0.12.3: clear default skill selections',b.created_at
+            FROM model m JOIN {BACKUP_TABLE} b ON b.model_id=m.id WHERE b.run_id=%s''', (run_id,))
+        cur.execute(f'''UPDATE model m SET meta=(m.meta::jsonb - 'skillIds')::text,
+            version_id=b.after_version_id,updated_at=b.created_at
+            FROM {BACKUP_TABLE} b WHERE b.run_id=%s AND b.model_id=m.id''', (run_id,))
+        cur.execute(f'SELECT model_id,after_version_id FROM {BACKUP_TABLE} WHERE run_id=%s', (run_id,))
+        versions = {row['model_id']: row['after_version_id'] for row in cur.fetchall()}
+        expected_rows = {}
         for model in models:
             meta = copy.deepcopy(decode(model['meta']))
             meta.pop('skillIds')
-            version_id = str(uuid.uuid4())
-            snapshot_meta = copy.deepcopy(meta)
-            snapshot_meta.pop('hidden', None)
-            snapshot_meta.pop('chat_variables_schema', None)
-            snapshot = {'name': model['name'], 'base_model_id': model['base_model_id'],
-                        'params': decode(model['params']) or {}, 'meta': snapshot_meta}
-            cur.execute(f'INSERT INTO {BACKUP_TABLE} (run_id,model_id,before_row,after_version_id,actor_id,created_at) VALUES (%s,%s,%s,%s,%s,%s)',
-                        (run_id, model['id'], Json(model), version_id, actor['id'], now))
-            cur.execute('''INSERT INTO model_history (id,model_id,parent_id,snapshot,user_id,commit_message,created_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s)''',
-                (version_id, model['id'], model['version_id'], Json(snapshot), actor['id'],
-                 '0.12.3: clear default skill selections', now))
-            cur.execute('UPDATE model SET meta=%s,version_id=%s,updated_at=%s WHERE id=%s',
-                        (json.dumps(meta), version_id, now, model['id']))
-            cur.execute('SELECT * FROM model WHERE id=%s', (model['id'],))
-            expected = {**model, 'meta': json.dumps(meta), 'version_id': version_id, 'updated_at': now}
-            if dict(cur.fetchone()) != expected:
-                raise AssertionError('A model field outside the intended change was modified.')
+            expected_rows[model['id']] = {**model, 'meta': meta, 'version_id': versions[model['id']], 'updated_at': now}
+        cur.execute('SELECT * FROM model WHERE id=ANY(%s)', (list(expected_rows),))
+        actual_rows = {row['id']: {**dict(row), 'meta': decode(row['meta'])} for row in cur.fetchall()}
+        if actual_rows != expected_rows:
+            raise AssertionError('A model field outside the intended change was modified.')
         cur.execute(f'SELECT count(*) AS n FROM model WHERE {SELECTED}')
         if cur.fetchone()['n']:
             raise AssertionError('Selected skills remain.')

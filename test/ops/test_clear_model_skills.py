@@ -62,6 +62,8 @@ def test_cleanup_is_selective_versioned_and_reversible(conn):
         assert cur.fetchone() == ({'skills': True}, False)
         cur.execute("SELECT snapshot->'meta'->'skillIds' FROM model_history WHERE id != 'old'")
         assert cur.fetchall() == [(None,), (None,)]
+        cur.execute("SELECT snapshot->'params',snapshot->'meta'->'builtinTools',snapshot->'meta'->'hidden' FROM model_history WHERE id != 'old'")
+        assert cur.fetchall() == [({'system': 'Keep this too'}, {'skills': True}, None)] * 2
     conn.commit()
     assert cleanup.clear_selections(conn, 'admin@example.test')['changed_models'] == 0
     conn.rollback()
@@ -74,6 +76,23 @@ def test_rehearsal_leaves_models_and_history_unchanged(conn):
     cleanup.clear_selections(conn, 'admin@example.test')
     conn.rollback()
     assert rows(conn, 'model') == before and rows(conn, 'model_history') == history
+
+
+def test_cleanup_batches_production_sized_inventory(conn):
+    with conn, conn.cursor() as cur:
+        cur.execute('''INSERT INTO model SELECT 'agent-' || n, user_id, name, base_model_id,
+            meta, params, version_id, is_active, created_at, updated_at
+            FROM model CROSS JOIN generate_series(1,392) AS n WHERE id='agent' ''')
+    before = rows(conn, 'model')
+    result = cleanup.clear_selections(conn, 'admin@example.test', {'owner@example.test'})
+    assert result['changed_models'] == 394
+    assert len(rows(conn, cleanup.BACKUP_TABLE)) == 394
+    assert len(rows(conn, 'model_history')) == 395
+    with conn.cursor() as cur:
+        cur.execute(f'SELECT count(*) FROM model WHERE {cleanup.SELECTED}')
+        assert cur.fetchone()[0] == 0
+    conn.rollback()
+    assert rows(conn, 'model') == before
 
 
 def test_unnotified_owner_prevents_any_change(conn):
