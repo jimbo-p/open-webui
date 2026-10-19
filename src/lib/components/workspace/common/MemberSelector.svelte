@@ -1,8 +1,9 @@
 <script lang="ts">
+	import ProfileImage from '$lib/components/chat/Messages/ProfileImage.svelte';
 	import { toast } from 'svelte-sonner';
 	import { getContext, onMount, onDestroy } from 'svelte';
 
-	const i18n = getContext('i18n');
+	const i18n = getContext('i18n') as any;
 
 	import { user as _user } from '$lib/stores';
 	import { getUserInfoById, searchUsers } from '$lib/apis/users';
@@ -17,6 +18,8 @@
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Checkbox from '$lib/components/common/Checkbox.svelte';
 	import { getGroups } from '$lib/apis/groups';
+	import type { App } from '$lib/apis/apps';
+	import Grid from '$lib/components/icons/Grid.svelte';
 
 	export let includeGroups = true;
 	export let includeUsers = true;
@@ -24,22 +27,39 @@
 	export let includeSessionUser = false;
 	export let accessGrants: { principal_type: string; principal_id: string }[] = [];
 
-	export let groupIds = [];
-	export let userIds = [];
+	export let groupIds: string[] = [];
+	export let userIds: string[] = [];
+	export let appIds: string[] = [];
+	export let apps: App[] = [];
+	$: filteredApps = apps.filter((app) =>
+		`${app.name} ${app.slug}`.toLowerCase().includes(query.toLowerCase())
+	);
 
-	let groups = null;
-	let filteredGroups = [];
+	let groups: any[] | null = null;
+	let filteredGroups: any[] = [];
+
+	const hasGrant = (principalType: string, principalId: string) =>
+		accessGrants.some(
+			(grant) => grant.principal_type === principalType && grant.principal_id === principalId
+		);
 
 	$: filteredGroups = groups
-		? groups.filter((group) => group.name.toLowerCase().includes(query.toLowerCase()))
+		? groups.filter(
+				(group) =>
+					group.name.toLowerCase().includes(query.toLowerCase()) && !hasGrant('group', group.id)
+			)
 		: [];
 
-	let selectedGroup = {};
-	let selectedUsers = {};
+	$: filteredUsers = (users ?? []).filter(
+		(user) => !hasGrant('user', user.id) && (includeSessionUser || user?.id !== $_user?.id)
+	);
+
+	let selectedGroup: Record<string, any> = {};
+	let selectedUsers: Record<string, any> = {};
 
 	let page = 1;
-	let users = null;
-	let total = null;
+	let users: any[] | null = null;
+	let total: number | null = null;
 
 	let query = '';
 	let searchDebounceTimer: ReturnType<typeof setTimeout>;
@@ -67,7 +87,7 @@
 	const handleSearchInput = () => {
 		clearTimeout(searchDebounceTimer);
 		searchDebounceTimer = setTimeout(() => {
-			getUserList();
+			if (includeUsers) getUserList();
 		}, 300);
 	};
 
@@ -75,15 +95,20 @@
 		clearTimeout(searchDebounceTimer);
 	});
 
-	$: if (page !== null && orderBy !== null && direction !== null) {
+	$: if (includeUsers && page !== null && orderBy !== null && direction !== null) {
 		getUserList();
+	} else if (!includeUsers) {
+		users = [];
+		total = 0;
 	}
 
 	onMount(async () => {
-		groups = await getGroups(localStorage.token, true).catch((error) => {
-			console.error(error);
-			return [];
-		});
+		groups = includeGroups
+			? await getGroups(localStorage.token, true).catch((error) => {
+					console.error(error);
+					return [];
+				})
+			: [];
 
 		if (userIds.length > 0) {
 			userIds.forEach(async (id) => {
@@ -168,6 +193,22 @@
 			</div>
 		{/if}
 
+		{#if appIds.length > 0}
+			<div class="mx-1 mb-1.5">
+				<div class="text-xs text-gray-500 mx-0.5 mb-1">{appIds.length} {$i18n.t('Apps')}</div>
+				<div class="flex gap-1 flex-wrap">
+					{#each apps.filter((app) => appIds.includes(app.id)) as app (app.id)}
+						<button
+							type="button"
+							class="inline-flex items-center space-x-1 px-2 py-1 bg-gray-100/50 dark:bg-gray-850 rounded-lg text-xs"
+							on:click={() => (appIds = appIds.filter((id) => id !== app.id))}
+						>
+							<span>{app.name}</span><XMark className="size-3" />
+						</button>
+					{/each}
+				</div>
+			</div>
+		{/if}
 		<div class="flex gap-1 mb-1">
 			<div class=" flex w-full space-x-2">
 				<div class="flex flex-1">
@@ -195,7 +236,7 @@
 			</div>
 		</div>
 
-		{#if users.length > 0 || filteredGroups.length > 0}
+		{#if (includeUsers && filteredUsers.length > 0) || (includeGroups && filteredGroups.length > 0) || filteredApps.length > 0}
 			<div class="scrollbar-hidden relative whitespace-nowrap w-full max-w-full">
 				<div class=" text-sm text-left text-gray-500 dark:text-gray-400 w-full max-w-full">
 					<div class="w-full max-h-96 overflow-y-auto rounded-lg">
@@ -241,64 +282,104 @@
 							</div>
 						{/if}
 
-						{#if includeUsers}
+						{#if includeUsers && filteredUsers.length > 0}
 							<div class="text-xs text-gray-500 mb-1 mx-1">
 								{$i18n.t('Users')}
 							</div>
 
 							<div>
-								{#each users as user, userIdx (user.id)}
-									{#if !accessGrants.some((grant) => grant.principal_type === 'user' && grant.principal_id === user.id) && (includeSessionUser || user?.id !== $_user?.id)}
-										<button
-											class=" dark:border-gray-850 text-xs flex items-center justify-between w-full"
-											type="button"
-											on:click={() => {
-												if ((userIds ?? []).includes(user.id)) {
-													userIds = userIds.filter((id) => id !== user.id);
-													delete selectedUsers[user.id];
-												} else {
-													userIds = [...userIds, user.id];
-													selectedUsers[user.id] = user;
-												}
-											}}
-										>
-											<div class="px-3 py-1.5 font-normal text-gray-900 dark:text-white flex-1">
-												<div class="flex items-center gap-2">
-													<ProfilePreview {user} side="right" align="center" sideOffset={6}>
-														<img
-															class="rounded-2xl w-6 h-6 object-cover flex-shrink-0"
-															src={`${WEBUI_API_BASE_URL}/users/${user.id}/profile/image`}
-															alt="user"
-														/>
-													</ProfilePreview>
-													<Tooltip content={user.email} placement="top-start">
-														<div class="font-normal truncate">{user.name}</div>
-													</Tooltip>
-
-													{#if user?.is_active}
-														<div>
-															<span class="relative flex size-1.5">
-																<span
-																	class="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-75"
-																></span>
-																<span
-																	class="relative inline-flex size-1.5 rounded-full bg-green-500"
-																></span>
-															</span>
-														</div>
-													{/if}
-												</div>
-											</div>
-
-											<div class="px-3 py-1">
-												<div class=" translate-y-0.5">
-													<Checkbox
-														state={(userIds ?? []).includes(user.id) ? 'checked' : 'unchecked'}
+								{#each filteredUsers as user (user.id)}
+									<button
+										class=" dark:border-gray-850 text-xs flex items-center justify-between w-full"
+										type="button"
+										on:click={() => {
+											if ((userIds ?? []).includes(user.id)) {
+												userIds = userIds.filter((id) => id !== user.id);
+												delete selectedUsers[user.id];
+											} else {
+												userIds = [...userIds, user.id];
+												selectedUsers[user.id] = user;
+											}
+										}}
+									>
+										<div class="px-3 py-1.5 font-normal text-gray-900 dark:text-white flex-1">
+											<div class="flex items-center gap-2">
+												<ProfilePreview {user} side="right" align="center" sideOffset={6}>
+													<img
+														class="rounded-2xl w-6 h-6 object-cover flex-shrink-0"
+														src={`${WEBUI_API_BASE_URL}/users/${user.id}/profile/image`}
+														alt="user"
 													/>
+												</ProfilePreview>
+												<Tooltip content={user.email} placement="top-start">
+													<div class="font-normal truncate">{user.name}</div>
+												</Tooltip>
+
+												{#if user?.is_active}
+													<div>
+														<span class="relative flex size-1.5">
+															<span
+																class="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-75"
+															></span>
+															<span class="relative inline-flex size-1.5 rounded-full bg-green-500"
+															></span>
+														</span>
+													</div>
+												{/if}
+											</div>
+										</div>
+
+										<div class="px-3 py-1">
+											<div class=" translate-y-0.5">
+												<Checkbox
+													state={(userIds ?? []).includes(user.id) ? 'checked' : 'unchecked'}
+												/>
+											</div>
+										</div>
+									</button>
+								{/each}
+							</div>
+						{/if}
+
+						{#if filteredApps.length > 0}
+							<div class="text-xs text-gray-500 mb-1 mx-1 mt-3">{$i18n.t('Apps')}</div>
+							<div>
+								{#each filteredApps as app (app.id)}
+									<div class="text-xs flex items-center justify-between w-full">
+										<button
+											type="button"
+											class="px-3 py-1.5 font-normal text-gray-900 dark:text-white flex-1 min-w-0"
+											on:click={() =>
+												(appIds = appIds.includes(app.id)
+													? appIds.filter((id) => id !== app.id)
+													: [...appIds, app.id])}
+										>
+											<div class="flex items-center gap-2">
+												<div
+													class="size-6 rounded-lg bg-gray-100 dark:bg-gray-850 flex items-center justify-center shrink-0"
+												>
+													{#if app.data.manifest.profile_image_url}
+														<ProfileImage
+															src={app.data.manifest.profile_image_url}
+															allowExternal
+															className="size-6 rounded-lg!"
+														/>
+													{:else}<Grid className="size-3.5" />{/if}
 												</div>
+												<span class="truncate">{app.name}</span>
 											</div>
 										</button>
-									{/if}
+										<div class="px-3 py-1">
+											<Checkbox
+												ariaLabel={app.name}
+												state={appIds.includes(app.id) ? 'checked' : 'unchecked'}
+												on:change={() =>
+													(appIds = appIds.includes(app.id)
+														? appIds.filter((id) => id !== app.id)
+														: [...appIds, app.id])}
+											/>
+										</div>
+									</div>
 								{/each}
 							</div>
 						{/if}

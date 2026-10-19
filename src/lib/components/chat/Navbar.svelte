@@ -36,11 +36,13 @@
 	import ChatCheck from '../icons/ChatCheck.svelte';
 	import Knobs from '../icons/Knobs.svelte';
 	import { isTemporaryChatId } from '$lib/utils/chatId';
+	import ChatParticipants from '$lib/components/common/ChatParticipants.svelte';
 
-	const i18n = getContext('i18n');
+	const i18n: any = getContext('i18n');
 
 	export let initNewChat: Function;
 	export let readOnly: boolean = false;
+	export let liveParticipants: { id: string; name: string }[] = [];
 	export let shareEnabled: boolean = false;
 	export let scrollTop = 0;
 	export let scrollToTop: (() => void) | null = null;
@@ -75,7 +77,7 @@
 	on:click={() => {
 		initNewChat();
 	}}
-	aria-label="New Chat"
+	aria-label={$i18n.t('New Chat')}
 />
 
 <nav
@@ -113,12 +115,14 @@
 				{/if}
 
 				<div
-					class="flex-1 overflow-hidden max-w-full mt-0.5 py-0.5 pl-1 {$showSidebar ? 'ml-1' : ''}"
+					class="flex-1 min-w-0 overflow-hidden max-w-full mt-0.5 py-0.5 pl-1 {$showSidebar
+						? 'ml-1'
+						: ''}"
 				>
 					{#if chat?.id}
 						<div class="flex max-w-full min-w-0 items-center gap-2 mr-2">
 							<div
-								class="min-w-0 truncate py-1 text-left text-[15px] font-normal text-gray-700 dark:text-gray-300"
+								class="min-w-0 truncate py-1 text-left text-[0.9375rem] font-normal text-gray-700 dark:text-gray-300"
 							>
 								{title || chat?.chat?.title || $i18n.t('New Chat')}
 							</div>
@@ -149,11 +153,24 @@
 									</button>
 								</Menu>
 							{/if}
+
+							{#if !$temporaryChatEnabled && ($user?.role === 'admin' || ($user?.permissions?.chat?.delete ?? true))}
+								<button
+									id="delete-chat-button"
+									aria-label={$i18n.t('Delete')}
+									class="hidden"
+									on:click={() => {
+										deleteChatHandler(chat.id);
+									}}
+								>
+									<EllipsisHorizontal className="size-4.5" strokeWidth="1.5" />
+								</button>
+							{/if}
 						</div>
 					{:else}
 						<div class="pointer-events-none invisible flex max-w-full min-w-0 items-center gap-2">
 							<div
-								class="min-w-0 truncate py-1 text-left text-[15px] font-normal text-gray-700 dark:text-gray-300"
+								class="min-w-0 truncate py-1 text-left text-[0.9375rem] font-normal text-gray-700 dark:text-gray-300"
 							>
 								{$i18n.t('New Chat')}
 							</div>
@@ -161,8 +178,8 @@
 					{/if}
 				</div>
 
-				<div class="mr-1 flex flex-none items-center gap-2 self-center">
-					<!-- <div class="md:hidden flex self-center w-[1px] h-5 mx-2 bg-gray-300 dark:bg-stone-700" /> -->
+				<div class="lg:mr-1 flex flex-none items-center gap-3 self-center">
+					<!-- <div class="md:hidden flex self-center w-[0.0625rem] h-5 mx-2 bg-gray-300 dark:bg-stone-700" /> -->
 
 					{#if $user?.role === 'user' ? ($user?.permissions?.chat?.temporary ?? true) && !($user?.permissions?.chat?.temporary_enforced ?? false) : true}
 						{#if !chat?.id}
@@ -184,9 +201,9 @@
 
 										// add 'temporary-chat=true' to the URL
 										if ($temporaryChatEnabled) {
-											window.history.replaceState(null, '', '?temporary-chat=true');
+											window.history.replaceState(window.history.state, '', '?temporary-chat=true');
 										} else {
-											window.history.replaceState(null, '', location.pathname);
+											window.history.replaceState(window.history.state, '', location.pathname);
 										}
 									}}
 									aria-label={$i18n.t(`Temporary Chat`)}
@@ -223,11 +240,19 @@
 								on:click={() => {
 									initNewChat();
 								}}
-								aria-label="New Chat"
+								aria-label={$i18n.t('New Chat')}
 							>
 								<ChatPlus className="size-4.5" strokeWidth="1.5" />
 							</button>
 						</Tooltip>
+					{/if}
+
+					{#if liveParticipants.length > 0}
+						<ChatParticipants
+							participants={liveParticipants}
+							mode="presence"
+							avatarClass="size-5"
+						/>
 					{/if}
 
 					{#if $user?.role === 'admin' || ($user?.permissions.chat?.controls ?? true)}
@@ -237,7 +262,7 @@
 								on:click={async () => {
 									await showControls.set(!$showControls);
 								}}
-								aria-label="Controls"
+								aria-label={$i18n.t('Controls')}
 							>
 								<Knobs className="size-5" strokeWidth="1" />
 							</button>
@@ -264,7 +289,7 @@
 						<Banner
 							banner={{
 								type: 'info',
-								title: 'Trial License',
+								title: $i18n.t('Trial License'),
 								content: $i18n.t(
 									'You are currently using a trial license. Please contact support to upgrade your license.'
 								)
@@ -276,7 +301,7 @@
 						<Banner
 							banner={{
 								type: 'error',
-								title: 'License Error',
+								title: $i18n.t('License Error'),
 								content: $i18n.t(
 									'Exceeded the number of seats in your license. Please contact support to increase the number of seats.'
 								)
