@@ -2,6 +2,8 @@
 
 Default is a transactional rehearsal followed by ROLLBACK. Live connections use
 the explicitly selected OxyGPT environment. Local tests use OWUI_SKILLS_TEST_DSN.
+Production application requires owner notification; an authorized dev cleanup
+can be applied before the production notification.
 No credentials, prompts, skill bodies, or owner emails are printed.
 """
 
@@ -91,7 +93,7 @@ def clear_selections(conn, actor_email, notified_emails=None):
             cur.execute('''INSERT INTO model_history (id,model_id,parent_id,snapshot,user_id,commit_message,created_at)
                 VALUES (%s,%s,%s,%s,%s,%s,%s)''',
                 (version_id, model['id'], model['version_id'], Json(snapshot), actor['id'],
-                 '0.12.3: clear default skill selections after owner notification', now))
+                 '0.12.3: clear default skill selections', now))
             cur.execute('UPDATE model SET meta=%s,version_id=%s,updated_at=%s WHERE id=%s',
                         (json.dumps(meta), version_id, now, model['id']))
             cur.execute('SELECT * FROM model WHERE id=%s', (model['id'],))
@@ -140,9 +142,10 @@ def main():
     if args.environment == 'prod' and not args.apply:
         parser.error('Production rehearsals are not allowed; validate in dev, then explicitly apply.')
     notified = None
-    if args.apply and not args.restore_run:
+    if args.apply and not args.restore_run and args.environment == 'prod':
         if not args.notification_sent or not args.notified_emails:
-            parser.error('--apply requires --notification-sent and --notified-emails')
+            parser.error('Production --apply requires --notification-sent and --notified-emails')
+    if args.notified_emails:
         with open(args.notified_emails, encoding='utf-8-sig') as f:
             notified = {line.strip().lower() for line in f if line.strip()}
     conn = connect(args.environment)

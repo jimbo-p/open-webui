@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
 
 import psycopg2
 import pytest
@@ -97,3 +98,41 @@ def test_unexpected_global_selections_require_review(conn):
         cur.execute("UPDATE config SET value='{\"skillIds\":[\"skill\"]}'")
     with pytest.raises(ValueError, match='Global model defaults'):
         cleanup.clear_selections(conn, 'admin@example.test')
+
+
+@pytest.mark.parametrize('extra', [[], ['--notification-sent']])
+def test_production_apply_requires_notification_before_connecting(monkeypatch, extra):
+    monkeypatch.setattr(sys, 'argv', ['cleanup', '--environment', 'prod', '--actor-email', 'admin@example.test', '--apply', *extra])
+    monkeypatch.setattr(cleanup, 'connect', lambda environment: pytest.fail('Must reject before connecting'))
+    with pytest.raises(SystemExit) as error:
+        cleanup.main()
+    assert error.value.code == 2
+
+
+def test_authorized_dev_apply_commits_without_production_notification(conn, monkeypatch):
+    # Keep the disposable test connection open across the utility's durable-state check.
+    class BorrowedConnection:
+        def __getattr__(self, name):
+            return getattr(conn, name)
+
+        def close(self):
+            pass
+
+        def __enter__(self):
+            return conn.__enter__()
+
+        def __exit__(self, *args):
+            return conn.__exit__(*args)
+
+    def connect_dev(environment):
+        assert environment == 'dev'
+        return BorrowedConnection()
+
+    monkeypatch.setattr(cleanup, 'connect', connect_dev)
+    monkeypatch.setattr(sys, 'argv', ['cleanup', '--environment', 'dev', '--actor-email', 'admin@example.test', '--apply'])
+    cleanup.main()
+    with conn.cursor() as cur:
+        cur.execute(f'SELECT count(*) FROM model WHERE {cleanup.SELECTED}')
+        assert cur.fetchone()[0] == 0
+        cur.execute(f'SELECT count(*) FROM {cleanup.BACKUP_TABLE}')
+        assert cur.fetchone()[0] == 2

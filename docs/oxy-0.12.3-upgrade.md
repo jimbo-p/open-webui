@@ -37,24 +37,28 @@ The read-only October 19 inventory found 394 production model entries with selec
 
 Recipient and per-agent CSV/text files are local, ignored artifacts under the primary checkout's `.cache/owui-0123/`. Personal data is not committed or packaged into the image.
 
-1. Deliver the owner list. The user sends the notification.
-2. Wait for the user's confirmation before committing any selection removal or promoting production.
-3. Re-inventory both environments and notify any additional owners. Run the exact cleanup in dev first, verify it, then apply to production during the approved release window.
+1. Deliver the owner list. The user sends the production notification.
+2. The user has authorized applying the cleanup in dev before that notification, alongside removal of the model editor's Skills picker.
+3. Before production, refresh the inventory, notify any additional owners, and wait for the user's confirmation. Then apply the dev-validated cleanup during the approved release window.
 
 `scripts/clear_model_skills.py` defaults to a transaction followed by rollback. It removes only nonempty `model.meta.skillIds`, including inactive/hidden/base-model rows; preserves builtin Skills capability, skill records, permissions and unrelated metadata; stores full affected rows in `oxy_model_skill_selection_backup`; and creates new model-history revisions linked to the previous versions. Older revisions are preserved, so deliberately restoring an old revision can restore its selections. Existing chat-specific selections are outside this model-builder cleanup and remain unchanged.
 
-The script requires an existing administrator as revision author. Applying requires both `--notification-sent` and the actual `--notified-emails` file; newly affected owners outside that list stop the transaction. A bounded table lock prevents a concurrent model creation/edit from escaping the cleanup. Rollback is available with `--restore-run RUN_ID`; it refuses to overwrite later model edits. Always rehearse restoration in dev before an actual restore.
+The script requires an existing administrator as revision author. Production application requires both `--notification-sent` and the actual `--notified-emails` file; newly affected owners outside that list stop the transaction. An explicitly authorized dev apply does not require the production notification. A bounded table lock prevents a concurrent model creation/edit from escaping the cleanup. Rollback is available with `--restore-run RUN_ID`; it refuses to overwrite later model edits. Always rehearse restoration in dev before an actual restore.
 
 ```powershell
 # Rehearse in dev; commits nothing.
 python scripts/clear_model_skills.py --environment dev --actor-email James_Pruet@oxy.com
 
-# Only after the user confirms notification and authorizes proceeding:
-python scripts/clear_model_skills.py --environment dev --actor-email James_Pruet@oxy.com --apply --notification-sent --notified-emails PATH_TO_SENT_EMAIL_LIST
-# Verify dev before using the same command with --environment prod.
+# Authorized dev cleanup:
+python scripts/clear_model_skills.py --environment dev --actor-email James_Pruet@oxy.com --apply
+
+# Production only after the user confirms notification and authorizes proceeding:
+python scripts/clear_model_skills.py --environment prod --actor-email James_Pruet@oxy.com --apply --notification-sent --notified-emails PATH_TO_SENT_EMAIL_LIST
 ```
 
 After removal, refresh open browser tabs so cached model metadata cannot reselect old defaults. Check affected agents in fresh chats; explicit future skill selection continues to work normally.
+
+The shared model create/edit component no longer displays the Skills picker or fetches its selection list. The builtin Skills capability remains available for on-demand discovery and loading. Skill management and explicit chat selections remain available. As requested, this is a UI removal without an additional backend policy: imports and restoration of older versions can still carry model skill selections.
 
 ## Build and rollout
 
@@ -64,7 +68,7 @@ Build fresh frontend and backend artifacts on the existing immutable Python runt
 
 The fork's old Redis stream keys/encoding differ from native 0.12.3; upstream's legacy fallback only understands its own former shared hash. Drain/restart dev serving tasks together to avoid mixed stream formats. Use the same approach for a later approved production promotion; do not assume native rolling-upgrade compatibility covers our old custom format.
 
-Production promotion and committed skill cleanup remain on hold pending the user's notification confirmation. Dev validation can exercise the cleanup inside a rolled-back transaction without changing saved selections.
+Production promotion and production skill cleanup remain on hold pending the user's notification confirmation. The user separately authorized committing the cleanup in dev to match the intended production setup.
 
 ### Deployed dev candidate
 
@@ -78,7 +82,7 @@ Production remains on serving revision 425 and ingestion revision 8, with its or
 
 - 48 backend regressions pass in the deployed Python runtime with the candidate source. Includes native Redis append/retry/eviction/TTL, legacy native hash reads, compaction checkpoints and tool dispatcher history.
 - Eight frontend regressions pass, including tool/output identity and prior-round preservation.
-- Five PostgreSQL migration tests pass: selective cleanup, immutable old history, exact restoration, rollback-only rehearsal, notification drift, later-edit protection and unexpected global defaults.
+- Eight cleanup tests pass: selective cleanup, immutable old history, exact restoration, rollback-only rehearsal, notification drift, later-edit protection, unexpected global defaults, authorized dev application and production notification enforcement before connecting.
 - Dev database rehearsal changed eight models inside a transaction and rolled it back successfully. No skill cleanup has been committed.
 - The full frontend build and encryption source/artifact checks pass. All 313 packaged backend files and the requirements file match application commit `190acf34466a90803cd66fd43673a99bd45d04d9`; the image contains the new encryption WASM asset.
 - Private-network dev preflight found zero active tasks and successful ACL dry runs for all four Redis room-channel commands.
