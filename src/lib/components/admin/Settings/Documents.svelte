@@ -72,8 +72,6 @@
 	};
 
 	let RAGConfig: any = null;
-	let mediaMimeTypesConfigured = false;
-
 	const inputClass =
 		'w-full h-7 rounded-lg border border-gray-100/50 bg-gray-50/40 px-2 text-xs text-gray-700 outline-hidden transition-colors placeholder:text-gray-300 focus:border-blue-400 dark:border-white/[0.04] dark:bg-white/[0.03] dark:text-gray-300 dark:placeholder:text-gray-700 dark:focus:border-blue-500';
 	const actionButtonClass =
@@ -260,10 +258,6 @@
 			}
 		}
 
-		const mediaMimeTypes = RAGConfig.CONTENT_EXTRACTION_SUPPORTED_MEDIA_MIME_TYPES.split(',')
-			.map((mimeType: string) => mimeType.trim())
-			.filter((mimeType: string) => mimeType !== '');
-
 		const res = await updateRAGConfig(localStorage.token, {
 			...RAGConfig,
 			// Convert null (from cleared number inputs) to empty string so the backend
@@ -284,9 +278,12 @@
 				RAGConfig.EXTERNAL_DOCUMENT_LOADER_HEADERS.trim() !== ''
 					? JSON.parse(RAGConfig.EXTERNAL_DOCUMENT_LOADER_HEADERS)
 					: {},
-			// Blank clears the list, unless never set (null keeps the external-engine-only default)
 			CONTENT_EXTRACTION_SUPPORTED_MEDIA_MIME_TYPES:
-				mediaMimeTypes.length > 0 || mediaMimeTypesConfigured ? mediaMimeTypes : undefined,
+				RAGConfig.CONTENT_EXTRACTION_SUPPORTED_MEDIA_MIME_TYPES === null
+					? undefined
+					: RAGConfig.CONTENT_EXTRACTION_SUPPORTED_MEDIA_MIME_TYPES.split(',')
+							.map((mimeType: string) => mimeType.trim())
+							.filter((mimeType: string) => mimeType !== ''),
 			MINERU_PARAMS:
 				typeof RAGConfig.MINERU_PARAMS === 'string' && RAGConfig.MINERU_PARAMS.trim() !== ''
 					? JSON.parse(RAGConfig.MINERU_PARAMS)
@@ -295,10 +292,6 @@
 				.map((ext) => ext.trim())
 				.filter((ext) => ext !== '')
 		});
-
-		if (res) {
-			mediaMimeTypesConfigured = res.CONTENT_EXTRACTION_SUPPORTED_MEDIA_MIME_TYPES != null;
-		}
 		dispatch('save');
 	};
 
@@ -347,9 +340,8 @@
 				: config.EXTERNAL_DOCUMENT_LOADER_HEADERS;
 
 		config.MINERU_FILE_EXTENSIONS = (config?.MINERU_FILE_EXTENSIONS ?? ['pdf']).join(', ');
-		const storedMediaMimeTypes = config.CONTENT_EXTRACTION_SUPPORTED_MEDIA_MIME_TYPES;
-		mediaMimeTypesConfigured = storedMediaMimeTypes != null;
-		config.CONTENT_EXTRACTION_SUPPORTED_MEDIA_MIME_TYPES = (storedMediaMimeTypes ?? []).join(', ');
+		config.CONTENT_EXTRACTION_SUPPORTED_MEDIA_MIME_TYPES =
+			config?.CONTENT_EXTRACTION_SUPPORTED_MEDIA_MIME_TYPES?.join(', ') ?? null;
 		config.RAG_TOKENIZER_MODEL = config?.RAG_TOKENIZER_MODEL ?? '';
 
 		RAGConfig = config;
@@ -446,8 +438,12 @@
 				<AdminSettingRow
 					label={$i18n.t('settings.admin.documents.contentExtractionEngine.label')}
 					description={$i18n.t('settings.admin.documents.contentExtractionEngine.description')}
+					let:labelId
 				>
-					<SettingsSelect bind:value={RAGConfig.CONTENT_EXTRACTION_ENGINE}>
+					<SettingsSelect
+						id={`${labelId}-control`}
+						bind:value={RAGConfig.CONTENT_EXTRACTION_ENGINE}
+					>
 						<option value=""
 							>{$config?.features?.slim === true
 								? $i18n.t('Basic text only')
@@ -487,8 +483,9 @@
 					<AdminSettingRow
 						label={$i18n.t('settings.admin.documents.pdfLoaderMode.label')}
 						description={$i18n.t('settings.admin.documents.pdfLoaderMode.description')}
+						let:labelId
 					>
-						<SettingsSelect bind:value={RAGConfig.PDF_LOADER_MODE}>
+						<SettingsSelect id={`${labelId}-control`} bind:value={RAGConfig.PDF_LOADER_MODE}>
 							<option value="page">{$i18n.t('Page')}</option>
 							<option value="single">{$i18n.t('Single')}</option>
 						</SettingsSelect>
@@ -594,8 +591,12 @@
 					<AdminSettingRow
 						label={$i18n.t('settings.admin.documents.outputFormat.label')}
 						description={$i18n.t('settings.admin.documents.outputFormat.description')}
+						let:labelId
 					>
-						<SettingsSelect bind:value={RAGConfig.DATALAB_MARKER_OUTPUT_FORMAT}>
+						<SettingsSelect
+							id={`${labelId}-control`}
+							bind:value={RAGConfig.DATALAB_MARKER_OUTPUT_FORMAT}
+						>
 							<option value="markdown">{$i18n.t('Markdown')}</option>
 							<option value="json">{$i18n.t('JSON')}</option>
 							<option value="html">{$i18n.t('HTML')}</option>
@@ -821,8 +822,10 @@
 					<AdminSettingRow
 						label={$i18n.t('settings.admin.documents.apiMode.label')}
 						description={$i18n.t('settings.admin.documents.apiMode.description')}
+						let:labelId
 					>
 						<SettingsSelect
+							id={`${labelId}-control`}
 							bind:value={RAGConfig.MINERU_API_MODE}
 							on:change={() => {
 								const cloudUrl = 'https://mineru.net/api/v4';
@@ -872,8 +875,10 @@
 					<AdminSettingRow
 						label={$i18n.t('settings.admin.documents.apiTimeout.label')}
 						description={$i18n.t('settings.admin.documents.apiTimeout.description')}
+						let:labelId
 					>
 						<input
+							id={`${labelId}-control`}
 							class="w-16 rounded-lg border border-gray-100/50 bg-gray-50/40 px-2 text-right text-xs text-gray-700 outline-hidden transition-colors focus:border-blue-400 dark:border-white/[0.04] dark:bg-white/[0.03] dark:text-gray-300 dark:focus:border-blue-500"
 							type="number"
 							min="1"
@@ -923,8 +928,9 @@
 					<AdminSettingRow
 						label={$i18n.t('settings.admin.documents.textSplitter.label')}
 						description={$i18n.t('settings.admin.documents.textSplitter.description')}
+						let:labelId
 					>
-						<SettingsSelect bind:value={RAGConfig.TEXT_SPLITTER}>
+						<SettingsSelect id={`${labelId}-control`} bind:value={RAGConfig.TEXT_SPLITTER}>
 							<option value="">{$i18n.t('Default')} ({$i18n.t('Character')})</option>
 							<option value="token">{$i18n.t('Token')} ({$i18n.t('Tiktoken')})</option>
 							<option value="token_transformers" disabled={$config?.features?.slim === true}>
@@ -1011,8 +1017,10 @@
 					<AdminSettingRow
 						label={$i18n.t('settings.admin.documents.embeddingModelEngine.label')}
 						description={$i18n.t('settings.admin.documents.embeddingModelEngine.description')}
+						let:labelId
 					>
 						<SettingsSelect
+							id={`${labelId}-control`}
 							bind:value={RAG_EMBEDDING_ENGINE}
 							placeholder={$i18n.t('Select an embedding model engine')}
 							on:change={(e) => {
@@ -1179,8 +1187,10 @@
 					<AdminSettingRow
 						label={$i18n.t('settings.admin.documents.embeddingBatchSize.label')}
 						description={$i18n.t('settings.admin.documents.embeddingBatchSize.description')}
+						let:labelId
 					>
 						<input
+							id={`${labelId}-control`}
 							bind:value={RAG_EMBEDDING_BATCH_SIZE}
 							type="number"
 							class="w-14 bg-transparent text-center text-xs outline-none"
@@ -1203,8 +1213,10 @@
 							description={$i18n.t(
 								'settings.admin.documents.embeddingConcurrentRequests.description'
 							)}
+							let:labelId
 						>
 							<input
+								id={`${labelId}-control`}
 								bind:value={RAG_EMBEDDING_CONCURRENT_REQUESTS}
 								type="number"
 								class="w-14 bg-transparent text-center text-xs outline-none"
@@ -1252,8 +1264,10 @@
 							<AdminSettingRow
 								label={$i18n.t('settings.admin.documents.rerankingEngine.label')}
 								description={$i18n.t('settings.admin.documents.rerankingEngine.description')}
+								let:labelId
 							>
 								<SettingsSelect
+									id={`${labelId}-control`}
 									bind:value={RAGConfig.RAG_RERANKING_ENGINE}
 									placeholder={$i18n.t('Select a reranking model engine')}
 									on:change={(e) => {
@@ -1321,8 +1335,10 @@
 						<AdminSettingRow
 							label={$i18n.t('settings.admin.documents.rerankingBatchSize.label')}
 							description={$i18n.t('settings.admin.documents.rerankingBatchSize.description')}
+							let:labelId
 						>
 							<input
+								id={`${labelId}-control`}
 								bind:value={RAGConfig.RAG_RERANKING_BATCH_SIZE}
 								type="number"
 								class="w-14 bg-transparent text-center text-xs outline-none"
@@ -1378,10 +1394,12 @@
 							</AdminSettingField>
 
 							<AdminSettingRow
+								let:labelId
 								label={$i18n.t('settings.admin.documents.bm25Weight.label')}
 								description={$i18n.t('settings.admin.documents.bm25Weight.description')}
 							>
 								<button
+									id={`${labelId}-control`}
 									class={actionButtonClass}
 									type="button"
 									on:click={() => {
@@ -1551,10 +1569,12 @@
 
 			<AdminSettingSection title={$i18n.t('settings.admin.documents.sections.dangerZone.title')}>
 				<AdminSettingRow
+					let:labelId
 					label={$i18n.t('settings.admin.documents.resetUploadDirectory.label')}
 					description={$i18n.t('settings.admin.documents.resetUploadDirectory.description')}
 				>
 					<button
+						id={`${labelId}-control`}
 						class={actionButtonClass}
 						type="button"
 						on:click={() => {
@@ -1565,10 +1585,12 @@
 					</button>
 				</AdminSettingRow>
 				<AdminSettingRow
+					let:labelId
 					label={$i18n.t('settings.admin.documents.resetVectorStorageKnowledge.label')}
 					description={$i18n.t('settings.admin.documents.resetVectorStorageKnowledge.description')}
 				>
 					<button
+						id={`${labelId}-control`}
 						class={actionButtonClass}
 						type="button"
 						on:click={() => {
@@ -1579,12 +1601,14 @@
 					</button>
 				</AdminSettingRow>
 				<AdminSettingRow
+					let:labelId
 					label={$i18n.t('settings.admin.documents.reindexKnowledgeAndMemoryVectors.label')}
 					description={$i18n.t(
 						'settings.admin.documents.reindexKnowledgeAndMemoryVectors.description'
 					)}
 				>
 					<button
+						id={`${labelId}-control`}
 						class={actionButtonClass}
 						type="button"
 						on:click={() => {

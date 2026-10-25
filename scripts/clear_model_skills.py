@@ -28,15 +28,19 @@ def connect(environment):
         conn = psycopg2.connect(os.environ['OWUI_SKILLS_TEST_DSN'])
     else:
         session = boto3.Session(region_name='us-east-1')
-        cluster = session.client('rds').describe_db_clusters(
-            DBClusterIdentifier=f'oxygpt-{environment}-cluster'
-        )['DBClusters'][0]
+        cluster = session.client('rds').describe_db_clusters(DBClusterIdentifier=f'oxygpt-{environment}-cluster')[
+            'DBClusters'
+        ][0]
         password = session.client('secretsmanager').get_secret_value(
             SecretId=f'oxygpt/{environment}/rds_master_password'
         )['SecretString']
         conn = psycopg2.connect(
-            host=cluster['Endpoint'], dbname='openwebui', user='oxygpt_admin',
-            password=password, sslmode='require', connect_timeout=10,
+            host=cluster['Endpoint'],
+            dbname='openwebui',
+            user='oxygpt_admin',
+            password=password,
+            sslmode='require',
+            connect_timeout=10,
             application_name=f'owui_0123_skill_cleanup_{environment}',
         )
     with conn.cursor() as cur:
@@ -64,38 +68,53 @@ def clear_selections(conn, actor_email, notified_emails=None):
         cur.execute("SELECT value FROM config WHERE key='models.default_metadata'")
         defaults = cur.fetchone()
         if defaults and (decode(defaults['value']) or {}).get('skillIds'):
-            raise ValueError('Global model defaults now contain skill selections; refresh the inventory and review them.')
-        cur.execute("SELECT id FROM model WHERE meta::jsonb ? 'skillIds' AND jsonb_typeof(meta::jsonb->'skillIds') NOT IN ('array','null')")
+            raise ValueError(
+                'Global model defaults now contain skill selections; refresh the inventory and review them.'
+            )
+        cur.execute(
+            "SELECT id FROM model WHERE meta::jsonb ? 'skillIds' AND jsonb_typeof(meta::jsonb->'skillIds') NOT IN ('array','null')"
+        )
         if cur.fetchone():
             raise ValueError('Malformed skill selections require review before cleanup.')
         cur.execute(f'SELECT * FROM model WHERE {SELECTED} ORDER BY id')
         models = [dict(row) for row in cur.fetchall()]
         if notified_emails is not None:
-            cur.execute(f'''SELECT DISTINCT lower(trim(u.email)) AS email FROM model m
-                LEFT JOIN "user" u ON u.id=m.user_id WHERE {SELECTED}''')
+            cur.execute(f"""SELECT DISTINCT lower(trim(u.email)) AS email FROM model m
+                LEFT JOIN "user" u ON u.id=m.user_id WHERE {SELECTED}""")
             if any(row['email'] not in notified_emails for row in cur.fetchall()):
-                raise ValueError('An affected owner is missing from the notified list; refresh and notify before applying.')
-        cur.execute(f'''CREATE TABLE IF NOT EXISTS {BACKUP_TABLE} (
+                raise ValueError(
+                    'An affected owner is missing from the notified list; refresh and notify before applying.'
+                )
+        cur.execute(f"""CREATE TABLE IF NOT EXISTS {BACKUP_TABLE} (
             run_id text NOT NULL, model_id text NOT NULL, before_row jsonb NOT NULL,
             after_version_id text NOT NULL, actor_id text NOT NULL, created_at bigint NOT NULL,
-            restored_at bigint, PRIMARY KEY (run_id,model_id))''')
+            restored_at bigint, PRIMARY KEY (run_id,model_id))""")
         # Copy large model definitions inside PostgreSQL. Sending their full prompts
         # back over a remote connection can hold the model-edit lock for minutes.
-        cur.execute(f'''INSERT INTO {BACKUP_TABLE}
+        cur.execute(
+            f"""INSERT INTO {BACKUP_TABLE}
             (run_id,model_id,before_row,after_version_id,actor_id,created_at)
             SELECT %s,m.id,to_jsonb(m),gen_random_uuid()::text,%s,%s
-            FROM model m WHERE {SELECTED}''', (run_id, actor['id'], now))
-        cur.execute(f'''INSERT INTO model_history
+            FROM model m WHERE {SELECTED}""",
+            (run_id, actor['id'], now),
+        )
+        cur.execute(
+            f"""INSERT INTO model_history
             (id,model_id,parent_id,snapshot,user_id,commit_message,created_at)
             SELECT b.after_version_id,m.id,m.version_id,
                 jsonb_build_object('name',m.name,'base_model_id',m.base_model_id,
                     'params',coalesce(nullif(m.params::jsonb,'null'::jsonb),'{{}}'::jsonb),
                     'meta',m.meta::jsonb - 'skillIds' - 'hidden' - 'chat_variables_schema'),
                 b.actor_id,'0.12.3: clear default skill selections',b.created_at
-            FROM model m JOIN {BACKUP_TABLE} b ON b.model_id=m.id WHERE b.run_id=%s''', (run_id,))
-        cur.execute(f'''UPDATE model m SET meta=(m.meta::jsonb - 'skillIds')::text,
+            FROM model m JOIN {BACKUP_TABLE} b ON b.model_id=m.id WHERE b.run_id=%s""",
+            (run_id,),
+        )
+        cur.execute(
+            f"""UPDATE model m SET meta=(m.meta::jsonb - 'skillIds')::text,
             version_id=b.after_version_id,updated_at=b.created_at
-            FROM {BACKUP_TABLE} b WHERE b.run_id=%s AND b.model_id=m.id''', (run_id,))
+            FROM {BACKUP_TABLE} b WHERE b.run_id=%s AND b.model_id=m.id""",
+            (run_id,),
+        )
         cur.execute(f'SELECT model_id,after_version_id FROM {BACKUP_TABLE} WHERE run_id=%s', (run_id,))
         versions = {row['model_id']: row['after_version_id'] for row in cur.fetchall()}
         expected_rows = {}
@@ -116,7 +135,10 @@ def clear_selections(conn, actor_email, notified_emails=None):
 def restore_selections(conn, run_id):
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute('LOCK TABLE model IN SHARE ROW EXCLUSIVE MODE')
-        cur.execute(f'SELECT * FROM {BACKUP_TABLE} WHERE run_id=%s AND restored_at IS NULL ORDER BY model_id FOR UPDATE', (run_id,))
+        cur.execute(
+            f'SELECT * FROM {BACKUP_TABLE} WHERE run_id=%s AND restored_at IS NULL ORDER BY model_id FOR UPDATE',
+            (run_id,),
+        )
         rows = cur.fetchall()
         if not rows:
             raise ValueError('No unrestored backup exists for that run.')
@@ -131,8 +153,10 @@ def restore_selections(conn, run_id):
             if meta != {key: value for key, value in original_meta.items() if key != 'skillIds'}:
                 raise ValueError('Model metadata changed after cleanup; refusing to overwrite it.')
             # Restore only fields touched by cleanup. Keep the migration history as an audit trail.
-            cur.execute('UPDATE model SET meta=%s,version_id=%s,updated_at=%s WHERE id=%s',
-                        (before['meta'], before['version_id'], before['updated_at'], row['model_id']))
+            cur.execute(
+                'UPDATE model SET meta=%s,version_id=%s,updated_at=%s WHERE id=%s',
+                (before['meta'], before['version_id'], before['updated_at'], row['model_id']),
+            )
         cur.execute(f'UPDATE {BACKUP_TABLE} SET restored_at=%s WHERE run_id=%s', (int(time.time()), run_id))
     return {'run_id': run_id, 'restored_models': len(rows)}
 
@@ -157,7 +181,11 @@ def main():
             notified = {line.strip().lower() for line in f if line.strip()}
     conn = connect(args.environment)
     try:
-        result = restore_selections(conn, args.restore_run) if args.restore_run else clear_selections(conn, args.actor_email, notified)
+        result = (
+            restore_selections(conn, args.restore_run)
+            if args.restore_run
+            else clear_selections(conn, args.actor_email, notified)
+        )
         if args.apply:
             conn.commit()
         else:

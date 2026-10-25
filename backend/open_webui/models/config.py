@@ -4,24 +4,20 @@ Replaces the old single-row JSON blob machinery with a simple per-key model
 mirroring cptr's Config.
 
 Each config key is stored as its own row: key TEXT PK, value JSON.
-Single-key reads are served from a short-lived snapshot of the whole table, which every write
-retires. Multi-key and whole-table reads go straight to the database. Writes are explicit awaited
-upserts that raise on failure (no more fire-and-forget create_task).
+Reads are direct DB lookups. Writes are explicit awaited upserts that raise on
+failure (no more fire-and-forget create_task).
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from typing import Any, ClassVar
 
 from fastapi.encoders import jsonable_encoder
-from open_webui.env import CONFIG_CACHE_TTL
 from open_webui.internal.db import Base, get_async_db
-from sqlalchemy import JSON, BigInteger, Column, Text, delete, event, select
+from sqlalchemy import JSON, BigInteger, Column, Text, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
 
 log = logging.getLogger(__name__)
 
@@ -101,70 +97,6 @@ def _json_value(value: Any) -> Any:
     return jsonable_encoder(value)
 
 
-def _copied(value: Any) -> Any:
-    """Independent copy for callers that mutate what they read; snapshot values are JSON, so only dict and list nest."""
-    if isinstance(value, dict):
-        return {key: _copied(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_copied(item) for item in value]
-    return value
-
-
-# Bumped by every write, which is what retires a snapshot taken before it.
-_cache_generation = 0
-_snapshot: tuple[int, float, dict[str, Any]] | None = None
-_refill_lock = asyncio.Lock()
-
-
-def _live_snapshot() -> dict[str, Any] | None:
-    """The cached rows, or None once a write or the TTL has retired them."""
-    if _snapshot is None:
-        return None
-    generation, expires_at, values = _snapshot
-    if generation != _cache_generation or expires_at <= time.monotonic():
-        return None
-    return values
-
-
-async def _persisted_config() -> dict[str, Any]:
-    """Every persisted config row, in one query, shared by all readers until it is retired."""
-    global _snapshot
-    values = _live_snapshot()
-    if values is not None:
-        return values
-    # One reader refills while the rest wait, so a slow query cannot become many.
-    async with _refill_lock:
-        values = _live_snapshot()
-        if values is not None:
-            return values
-        generation = _cache_generation
-        async with get_async_db() as db:
-            result = await db.execute(select(Config))
-            values = {row.key: row.value for row in result.scalars().all()}
-        # A write during the query already moved the generation on, retiring this on arrival.
-        _snapshot = (generation, time.monotonic() + CONFIG_CACHE_TTL, values)
-        return values
-
-
-def _invalidate_cache() -> None:
-    global _cache_generation
-    _cache_generation += 1
-
-
-@event.listens_for(Session, 'after_commit')
-def _invalidate_committed_config(session: Session) -> None:
-    # 0.12.0 permits callers to supply the transaction. Invalidate only after
-    # its commit, so a reader cannot cache the old rows between flush and commit.
-    if not session.in_nested_transaction() and session.info.pop('owui_config_changed', False):
-        _invalidate_cache()
-
-
-@event.listens_for(Session, 'after_rollback')
-def _discard_config_change(session: Session) -> None:
-    if not session.in_nested_transaction():
-        session.info.pop('owui_config_changed', None)
-
-
 # ── Model ────────────────────────────────────────────────────────────────────
 
 
@@ -212,18 +144,9 @@ class Config(Base):
         """Get a config value by key. Returns default if not set."""
         if not Config.persistent_enabled_for(key):
             return Config.default_value(key, default)
-        # These keys get read, mutated, then written back whole, so a stale read drops another worker's change.
-        if key in {
-            'tool_server.connections',
-            'events.webhooks',
-            'external_knowledge.connections',
-            'evaluation.arena.models',
-        }:
-            async with get_async_db() as db:
-                row = await db.get(Config, key)
-                return row.value if row else Config.default_value(key, default)
-        values = await _persisted_config()
-        return _copied(values[key]) if key in values else Config.default_value(key, default)
+        async with get_async_db() as db:
+            row = await db.get(Config, key)
+            return row.value if row else Config.default_value(key, default)
 
     @staticmethod
     async def get_many(*keys: str) -> dict:
@@ -302,7 +225,6 @@ class Config(Base):
             else:
                 db.add(Config(key=key, value=value, updated_at=now))
         await db.flush()
-        db.info['owui_config_changed'] = True
 
     @staticmethod
     async def delete(key: str) -> bool:
@@ -312,7 +234,6 @@ class Config(Base):
             if row:
                 await db.delete(row)
                 await db.commit()
-                _invalidate_cache()
                 return True
             return False
 
@@ -322,7 +243,6 @@ class Config(Base):
         async with get_async_db() as db:
             await db.execute(delete(Config))
             await db.commit()
-            _invalidate_cache()
 
     @staticmethod
     async def seed_defaults(defaults: dict) -> None:
@@ -350,7 +270,6 @@ class Config(Base):
 
             if new_count:
                 await db.commit()
-                _invalidate_cache()
                 log.info('Seeded %d new config defaults', new_count)
 
     @staticmethod
@@ -379,7 +298,6 @@ class Config(Base):
                 await db.delete(row)
 
             await db.commit()
-            _invalidate_cache()
             log.info(
                 'Renamed %d config keys from %s.* to %s.*; deleted %d old duplicates',
                 moved_count,
@@ -465,7 +383,6 @@ class Config(Base):
 
             if repaired_keys or orphan_keys or default_model_keys:
                 await db.commit()
-                _invalidate_cache()
                 if repaired_keys or orphan_keys:
                     log.info('Repaired flattened dict config rows for %s', ', '.join(repaired_keys))
                 if default_model_keys:

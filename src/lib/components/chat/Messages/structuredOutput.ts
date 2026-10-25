@@ -14,7 +14,7 @@ export type OutputItem = {
 	status?: string;
 	arguments?: unknown;
 	content?: OutputContentPart[];
-	summary?: OutputContentPart[];
+	summary?: OutputContentPart[] | string;
 	output?: OutputContentPart[];
 	files?: unknown;
 	embeds?: unknown;
@@ -64,6 +64,11 @@ export type OutputDisplayItem =
 			type: 'file';
 			id: string;
 			item: Record<string, unknown>;
+	  }
+	| {
+			type: 'context_compaction';
+			id: string;
+			summary: string;
 	  };
 
 type ResponseStreamEvent = {
@@ -409,6 +414,16 @@ export function buildOutputDisplayItems(output: OutputItem[] = []): OutputDispla
 			return;
 		}
 
+		if (item.type === 'open_webui:context_compaction') {
+			flushDetails();
+			displayItems.push({
+				type: 'context_compaction',
+				id: item.id ?? `context-compaction-${index}`,
+				summary: typeof item.summary === 'string' ? item.summary : ''
+			});
+			return;
+		}
+
 		if (item.type === 'message') {
 			const text = getMessageText(item);
 			if (text.trim()) {
@@ -509,13 +524,10 @@ function setPart(
 }
 
 function findOutputItemIndex(output: OutputItem[], item: OutputItem): number {
-	// Type must match: a function_call_output shares its call_id with the
-	// function_call it answers and must not replace it.
 	return output.findIndex(
 		(existing) =>
-			existing?.type === item.type &&
-			((!!item.id && existing?.id === item.id) ||
-				(!!item.call_id && existing?.call_id === item.call_id))
+			(!!item.id && existing?.id === item.id) ||
+			(!!item.call_id && existing?.type === item.type && existing?.call_id === item.call_id)
 	);
 }
 
@@ -571,9 +583,6 @@ export function applyResponseStreamEvent(
 		} else if (outputIndex < nextOutput.length) {
 			nextOutput.splice(outputIndex, 0, item);
 		} else {
-			while (nextOutput.length < outputIndex) {
-				nextOutput.push({ type: 'message', status: 'in_progress', role: 'assistant', content: [] });
-			}
 			nextOutput.push(item);
 		}
 		return nextOutput;
@@ -590,9 +599,6 @@ export function applyResponseStreamEvent(
 		} else if (outputIndex < nextOutput.length) {
 			nextOutput[outputIndex] = item;
 		} else {
-			while (nextOutput.length < outputIndex) {
-				nextOutput.push({ type: 'message', status: 'in_progress', role: 'assistant', content: [] });
-			}
 			nextOutput.push(item);
 		}
 		return nextOutput;
@@ -627,7 +633,7 @@ export function applyResponseStreamEvent(
 		if (!event.part) {
 			return nextOutput;
 		}
-		item.summary = [...(item.summary ?? [])];
+		item.summary = Array.isArray(item.summary) ? [...item.summary] : [];
 		const summaryIndex = event.summary_index ?? item.summary.length;
 		setPart(item.summary, summaryIndex, { ...event.part }, { type: 'summary_text', text: '' });
 		return nextOutput;
@@ -642,7 +648,7 @@ export function applyResponseStreamEvent(
 
 		if (deltaType === 'reasoning_summary_text') {
 			const summaryIndex = event.summary_index ?? 0;
-			item.summary = [...(item.summary ?? [])];
+			item.summary = Array.isArray(item.summary) ? [...item.summary] : [];
 			const part = ensurePart(item.summary, summaryIndex, { type: 'summary_text', text: '' });
 			part.text = appendDelta(part.text ?? '', event.delta);
 			return nextOutput;

@@ -35,8 +35,8 @@ from langchain_text_splitters import (
     TokenTextSplitter,
 )
 from open_webui.config import (
+    Config,
     DEFAULT_LOCALE,
-    ENV,
     RAG_EMBEDDING_CONTENT_PREFIX,
     RAG_EMBEDDING_MODEL_AUTO_UPDATE,
     RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE,
@@ -44,7 +44,6 @@ from open_webui.config import (
     RAG_RERANKING_MODEL_AUTO_UPDATE,
     RAG_RERANKING_MODEL_TRUST_REMOTE_CODE,
     UPLOAD_DIR,
-    Config,
 )
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.env import (
@@ -97,17 +96,17 @@ from open_webui.retrieval.web.firecrawl import search_firecrawl
 from open_webui.retrieval.web.google_pse import search_google_pse
 from open_webui.retrieval.web.jina_search import search_jina
 from open_webui.retrieval.web.kagi import search_kagi
-from open_webui.retrieval.web.linkup import search_linkup
+from open_webui.retrieval.web.utils import get_ssrf_safe_session, validate_url
 
 # Web search engines
 from open_webui.retrieval.web.main import SearchResult
 from open_webui.retrieval.web.microsoft_web_iq import search_microsoft_web_iq
 from open_webui.retrieval.web.mojeek import search_mojeek
 from open_webui.retrieval.web.ollama import search_ollama_cloud
-from open_webui.retrieval.web.openserp import search_openserp
 from open_webui.retrieval.web.perplexity import search_perplexity
 from open_webui.retrieval.web.perplexity_search import search_perplexity_search
 from open_webui.retrieval.web.searchapi import search_searchapi
+from open_webui.retrieval.web.openserp import search_openserp
 from open_webui.retrieval.web.searxng import search_searxng
 from open_webui.retrieval.web.serpapi import search_serpapi
 from open_webui.retrieval.web.serper import search_serper
@@ -117,10 +116,11 @@ from open_webui.retrieval.web.serpstack import search_serpstack
 from open_webui.retrieval.web.sougou import search_sougou
 from open_webui.retrieval.web.staan import search_staan
 from open_webui.retrieval.web.tavily import search_tavily
-from open_webui.retrieval.web.utils import get_ssrf_safe_session, get_web_loader, validate_url
+from open_webui.retrieval.web.utils import get_web_loader
 from open_webui.retrieval.web.yacy import search_yacy
 from open_webui.retrieval.web.yandex import search_yandex
 from open_webui.retrieval.web.ydc import search_youcom
+from open_webui.retrieval.web.linkup import search_linkup
 from open_webui.storage.provider import Storage
 from open_webui.utils.access_control import has_permission
 from open_webui.utils.access_control.files import has_access_to_file
@@ -1568,8 +1568,8 @@ def has_vector_results(result) -> bool:
     return bool(result and result.ids and result.ids[0])
 
 
-async def _complete_without_extraction(request, file, user, db, reason: str):
-    """Mark the file processed, keep the blob, do not call Tika or embeddings."""
+async def _store_without_extraction(request, file, user, db, reason: str):
+    """Keep the original blob without Tika or embeddings; the caller marks completion."""
     stub = skip_extraction_stub(file.filename, file.id, reason)
     file_hash = file.hash or (file.meta or {}).get('file_hash')
     log.info('Skipping text extraction for %s (%s)', file.filename, reason)
@@ -1577,7 +1577,6 @@ async def _complete_without_extraction(request, file, user, db, reason: str):
         file.id,
         {
             'content': stub,
-            'status': 'completed',
             'error': None,
             'skip_extraction': True,
             'skip_extraction_reason': reason,
@@ -1609,8 +1608,26 @@ async def process_file(
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
+    """Standalone processing endpoint: index the file, then mark it completed.
+
+    Uploads call index_file directly so they can finish knowledge linking before
+    reporting completion.
     """
-    Process a file and save its content to the vector database.
+    result = await index_file(request, form_data, user, db)
+    async with get_async_db() as session:
+        await Files.update_file_data_by_id(form_data.file_id, {'status': 'completed', 'error': None}, db=session)
+    return result
+
+
+async def index_file(
+    request: Request,
+    form_data: ProcessFileForm,
+    user,
+    db: AsyncSession,
+):
+    """Extract or reuse file content and index it without marking completion.
+
+    The caller marks completion after all its work, including any knowledge linking.
     Note: granular session management is used to prevent connection pool exhaustion.
     The session is committed before external API calls, and updates use a fresh session.
     """
@@ -1633,7 +1650,7 @@ async def process_file(
 
             skip_reason = skip_extraction_reason(file.filename, (file.meta or {}).get('content_type'))
             if skip_reason:
-                return await _complete_without_extraction(request, file, user, db, skip_reason)
+                return await _store_without_extraction(request, file, user, db, skip_reason)
 
             if form_data.content:
                 # Update the content in the file
@@ -1752,7 +1769,6 @@ async def process_file(
             hash = calculate_sha256_string(text_content)
 
             if config['rag.bypass_embedding_and_retrieval']:
-                await Files.update_file_data_by_id(file.id, {'status': 'completed', 'error': None}, db=db)
                 await Files.update_file_hash_by_id(file.id, hash, db=db)
                 await publish_event(
                     request,
@@ -1809,11 +1825,6 @@ async def process_file(
                                 db=session,
                             )
 
-                            await Files.update_file_data_by_id(
-                                file.id,
-                                {'status': 'completed', 'error': None},
-                                db=session,
-                            )
                             await Files.update_file_hash_by_id(file.id, hash, db=session)
 
                             await publish_event(
@@ -3028,13 +3039,6 @@ async def reset_upload_dir(request: Request, user=Depends(get_admin_user)) -> bo
     return True
 
 
-if ENV == 'dev':
-
-    @router.get('/ef/{text}')
-    async def get_embeddings(request: Request, text: str | None = 'Hello World!'):
-        return {'result': await request.app.state.EMBEDDING_FUNCTION(text, prefix=RAG_EMBEDDING_QUERY_PREFIX)}
-
-
 class BatchProcessFilesForm(BaseModel):
     files: list[FileModel]
     collection_name: str
@@ -3107,7 +3111,8 @@ async def process_files_batch(
 
             skip_reason = skip_extraction_reason(db_file.filename, (db_file.meta or {}).get('content_type'))
             if skip_reason:
-                await _complete_without_extraction(request, db_file, user, db, skip_reason)
+                await _store_without_extraction(request, db_file, user, db, skip_reason)
+                await Files.update_file_data_by_id(db_file.id, {'status': 'completed', 'error': None}, db=db)
                 skipped_results.append(BatchProcessFilesResult(file_id=file.id, status='completed'))
                 continue
 

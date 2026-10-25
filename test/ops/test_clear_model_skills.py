@@ -1,4 +1,5 @@
 """Integration checks against a disposable local PostgreSQL database only."""
+
 import importlib.util
 import json
 import os
@@ -22,7 +23,7 @@ def conn():
     assert conn.info.host == '127.0.0.1' and conn.info.dbname == 'owui_skill_test'
     with conn, conn.cursor() as cur:
         cur.execute('DROP SCHEMA public CASCADE; CREATE SCHEMA public')
-        cur.execute('''CREATE TABLE "user" (id text PRIMARY KEY, email text, role text);
+        cur.execute("""CREATE TABLE "user" (id text PRIMARY KEY, email text, role text);
             CREATE TABLE config (key text PRIMARY KEY, value json);
             CREATE TABLE model (id text PRIMARY KEY, user_id text, name text, base_model_id text,
                 meta text, params text, version_id text, is_active boolean, created_at bigint, updated_at bigint);
@@ -34,11 +35,23 @@ def conn():
             INSERT INTO config VALUES ('models.default_metadata','{"builtinTools":{"skills":true}}');
             INSERT INTO skill VALUES ('skill','Do the analysis.');
             INSERT INTO access_grant VALUES ('grant','agent');
-            INSERT INTO model_history VALUES ('old','agent',NULL,'{"old":true}','owner','Original',1)''')
-        for mid, selections, active in [('agent', ['skill'], True), ('inactive', ['skill'], False), ('empty', [], True)]:
-            meta = {'skillIds': selections, 'hidden': True, 'builtinTools': {'skills': True}, 'toolIds': ['tool'], 'description': 'Keep me'}
-            cur.execute('INSERT INTO model VALUES (%s,\'owner\',%s,\'base\',%s,\'{"system":"Keep this too"}\',\'old\',%s,1,2)',
-                        (mid, mid, json.dumps(meta), active))
+            INSERT INTO model_history VALUES ('old','agent',NULL,'{"old":true}','owner','Original',1)""")
+        for mid, selections, active in [
+            ('agent', ['skill'], True),
+            ('inactive', ['skill'], False),
+            ('empty', [], True),
+        ]:
+            meta = {
+                'skillIds': selections,
+                'hidden': True,
+                'builtinTools': {'skills': True},
+                'toolIds': ['tool'],
+                'description': 'Keep me',
+            }
+            cur.execute(
+                "INSERT INTO model VALUES (%s,'owner',%s,'base',%s,'{\"system\":\"Keep this too\"}','old',%s,1,2)",
+                (mid, mid, json.dumps(meta), active),
+            )
     yield conn
     conn.rollback()
     conn.close()
@@ -62,7 +75,9 @@ def test_cleanup_is_selective_versioned_and_reversible(conn):
         assert cur.fetchone() == ({'skills': True}, False)
         cur.execute("SELECT snapshot->'meta'->'skillIds' FROM model_history WHERE id != 'old'")
         assert cur.fetchall() == [(None,), (None,)]
-        cur.execute("SELECT snapshot->'params',snapshot->'meta'->'builtinTools',snapshot->'meta'->'hidden' FROM model_history WHERE id != 'old'")
+        cur.execute(
+            "SELECT snapshot->'params',snapshot->'meta'->'builtinTools',snapshot->'meta'->'hidden' FROM model_history WHERE id != 'old'"
+        )
         assert cur.fetchall() == [({'system': 'Keep this too'}, {'skills': True}, None)] * 2
     conn.commit()
     assert cleanup.clear_selections(conn, 'admin@example.test')['changed_models'] == 0
@@ -80,9 +95,9 @@ def test_rehearsal_leaves_models_and_history_unchanged(conn):
 
 def test_cleanup_batches_production_sized_inventory(conn):
     with conn, conn.cursor() as cur:
-        cur.execute('''INSERT INTO model SELECT 'agent-' || n, user_id, name, base_model_id,
+        cur.execute("""INSERT INTO model SELECT 'agent-' || n, user_id, name, base_model_id,
             meta, params, version_id, is_active, created_at, updated_at
-            FROM model CROSS JOIN generate_series(1,392) AS n WHERE id='agent' ''')
+            FROM model CROSS JOIN generate_series(1,392) AS n WHERE id='agent' """)
     before = rows(conn, 'model')
     result = cleanup.clear_selections(conn, 'admin@example.test', {'owner@example.test'})
     assert result['changed_models'] == 394
@@ -114,14 +129,16 @@ def test_restore_refuses_to_overwrite_later_edits(conn):
 
 def test_unexpected_global_selections_require_review(conn):
     with conn, conn.cursor() as cur:
-        cur.execute("UPDATE config SET value='{\"skillIds\":[\"skill\"]}'")
+        cur.execute('UPDATE config SET value=\'{"skillIds":["skill"]}\'')
     with pytest.raises(ValueError, match='Global model defaults'):
         cleanup.clear_selections(conn, 'admin@example.test')
 
 
 @pytest.mark.parametrize('extra', [[], ['--notification-sent']])
 def test_production_apply_requires_notification_before_connecting(monkeypatch, extra):
-    monkeypatch.setattr(sys, 'argv', ['cleanup', '--environment', 'prod', '--actor-email', 'admin@example.test', '--apply', *extra])
+    monkeypatch.setattr(
+        sys, 'argv', ['cleanup', '--environment', 'prod', '--actor-email', 'admin@example.test', '--apply', *extra]
+    )
     monkeypatch.setattr(cleanup, 'connect', lambda environment: pytest.fail('Must reject before connecting'))
     with pytest.raises(SystemExit) as error:
         cleanup.main()
@@ -148,7 +165,9 @@ def test_authorized_dev_apply_commits_without_production_notification(conn, monk
         return BorrowedConnection()
 
     monkeypatch.setattr(cleanup, 'connect', connect_dev)
-    monkeypatch.setattr(sys, 'argv', ['cleanup', '--environment', 'dev', '--actor-email', 'admin@example.test', '--apply'])
+    monkeypatch.setattr(
+        sys, 'argv', ['cleanup', '--environment', 'dev', '--actor-email', 'admin@example.test', '--apply']
+    )
     cleanup.main()
     with conn.cursor() as cur:
         cur.execute(f'SELECT count(*) FROM model WHERE {cleanup.SELECTED}')
