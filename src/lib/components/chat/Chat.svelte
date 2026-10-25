@@ -3607,6 +3607,7 @@
 		inputFiles: any[],
 		bridgeRequest: { userMessageId: string; modelId: string } | null = null
 	) => {
+		await settingDefaults;
 		const _files = structuredClone(inputFiles);
 
 		chatFiles.push(
@@ -3842,6 +3843,7 @@
 		return _chatId;
 	};
 
+	let awaitingDefaults = false;
 	const submitHandler = async (
 		userPrompt: string,
 		{
@@ -3883,6 +3885,15 @@
 		if (modelCommandMatch) {
 			handleModelCommand(modelCommandMatch[1]?.trim() ?? '');
 			return { status: 'rejected' };
+		}
+
+		// Drop a second send that races this wait, since prompt isn't cleared until after it
+		if (awaitingDefaults) return { status: 'rejected' };
+		awaitingDefaults = true;
+		try {
+			await settingDefaults;
+		} finally {
+			awaitingDefaults = false;
 		}
 
 		if (pendingOAuthTools.length > 0) {
