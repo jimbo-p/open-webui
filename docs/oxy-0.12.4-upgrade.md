@@ -5,9 +5,10 @@ Prepared from official Open WebUI `v0.12.4`, commit
 `origin/main` at `e17315b82565496626e3af356087bb8bf43a8144`.
 
 The user approved the specific patch removals and retentions below after an
-audit of the released upstream implementation. This document records a source
-candidate, not a deployment. Historical rollout details remain in the earlier
-upgrade documents.
+audit of the released upstream implementation, then authorized building,
+publishing, testing in dev, and promoting to production after successful checks
+and review for major automatic UI changes. Historical rollout details remain in
+the earlier upgrade documents.
 
 ## Removed in favor of upstream behavior
 
@@ -77,6 +78,78 @@ Docker build-memory environment setting does not override 0.12.4's explicit
 - Independent scope review confirmed ten retired-patch files match native
   0.12.4 byte-for-byte, with original-file exclusion definitions unchanged.
 
-No shared application database was used for these tests. Full browser acceptance,
-image packaging, and deployment integration have not been performed. The manual
-skill cleanup utility was not executed; its formatting changes preserve its AST.
+No shared application database was used for the isolated regression tests. The
+manual skill cleanup utility was not executed; its formatting changes preserve
+its AST. Historical upgrade tables receive formatting-only corrections for the
+repository's frontend CI; no application code changes after the built revision.
+
+## Published image
+
+- Application revision: `67c3b9f7da451350eb60626078b89126270381fb`.
+- Release overlay: [fork PR #8](https://github.com/jimbo-p/open-webui/pull/8).
+- Main promotion: [fork PR #9](https://github.com/jimbo-p/open-webui/pull/9).
+- ECR tag: `open-webui:v0.12.4-oxy1`.
+- Immutable digest: `sha256:acdf343c42d42f8d0d1c78d3c99558ac157c2b2a2ceb52ba5def7b7a29d500d7`.
+
+The maintained Dockerfile was built directly from an LF-preserving committed
+archive, with the full CPU runtime, Python 3.12.15, and the exact revision in
+`BUILD_HASH`. All 75 backend regressions also pass inside this actual image.
+Checks verified the committed backend source, 117 pinned requirements,
+dependency consistency, corporate trust certificates, and native encryption
+artifact. An isolated application boot using disposable SQLite passed homepage,
+health, database-health, and version checks.
+
+Publication used native ECR APIs through the existing permitted API endpoint;
+the jumpbox's Docker registry endpoint allows pulls only. No IAM or endpoint
+policy was changed. Manifest readback and a fresh pull matched the tested
+image's config, revision, and all 21 filesystem-layer identities.
+
+## Dev validation
+
+Dev serving revision `441` and ingestion revision `19` run the immutable image
+above, with one task each. The update changed only the application image;
+service settings, capacities, secret references, and sidecars were preserved.
+Both ECS deployments completed and all old containers exited successfully.
+
+- Every candidate task passed health, readiness, database connectivity, and
+  version checks. Schema head remains `0bd252b206fb`; startup migrations remain
+  disabled. The release adds no migration files.
+- All 446 existing configuration values and all 55 model metadata/parameter
+  fingerprints were unchanged. Native startup added only
+  `skills.lazy_loading.enable=false`, `ui.visibility={}`, and
+  `ldap.server.default_email_domain=''`.
+- Browser checks passed keyboard submission, a visibly rendered reply,
+  regeneration using the same model, and a real built-in timestamp call with
+  matching call/result identifiers and a visible final answer. There were no
+  JavaScript errors or duplicate completion requests.
+- Composer uploads of synthetic CSV, XLSX, and DXP files completed with
+  extraction skipped and downloaded bytes identical to the originals. This
+  verifies original-file preservation, not parsing by Excel or Spotfire.
+- An API-created note retained its content on first editor open and reload.
+- A fresh browser profile without a stored locale selected English and rendered
+  a reply without errors. This also avoided the empty-locale initialization
+  error seen in the 0.12.3 baseline's fresh test profile.
+- API-key identity verification and a real read-only MCP app-listing call
+  succeeded. Dedicated ingestion routing, upload, background processing,
+  knowledge attachment, source download through the web service, and vector
+  retrieval all passed. Each test deleted only its own temporary resources.
+- Startup logs retained the same two pre-existing unavailable tool endpoints
+  (`localhost:8052` and audio transcription) seen in the prior dev revision;
+  no new startup failure was found.
+
+## Automatic UI changes
+
+The tested chat layout, composer, model selector, and response controls remain
+familiar. Automatic upstream changes include smaller control/menu adjustments,
+upload feedback, compaction markers, profile cards, and sidebar Shift-selection.
+The upgrade does not require enabling optional features for these small changes
+to appear. Lazy skill loading and other existing feature switches are preserved.
+
+Upstream now enforces disabled personal direct integrations. Production already
+has that setting disabled. Four enabled saved connections across three users
+pointed to localhost; all 6,644 stored function calls reviewed for those users
+over 30 days matched native or managed tools, with no distinct personal-only
+operation or saved default direct-tool selection. All personal terminal entries
+were disabled. This does not prove the saved connections are never used: name
+collisions and browser-only selections cannot be excluded. Managed tool servers
+are unaffected, and the existing production setting is preserved.
