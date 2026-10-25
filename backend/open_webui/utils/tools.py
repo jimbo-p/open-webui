@@ -451,6 +451,7 @@ async def get_tools(request: Request, tool_ids: list[str], user: UserModel, extr
                     # Prepend tool ID to function name
                     function_name = f'{tool_id}_{function_name}'
 
+                tool_dict['spec'] = {**tool_dict['spec'], 'name': function_name}
                 tools_dict[function_name] = tool_dict
         else:
             if tool_id.startswith('server:'):
@@ -551,6 +552,7 @@ async def get_tools(request: Request, tool_ids: list[str], user: UserModel, extr
                             # Prepend server ID to function name
                             function_name = f'{server_id}_{function_name}'
 
+                        tool_dict['spec'] = {**tool_dict['spec'], 'name': function_name}
                         tools_dict[function_name] = tool_dict
 
                 else:
@@ -1284,9 +1286,8 @@ def convert_openapi_to_tool_payload(openapi_spec):
                         if resolved_schema.get('properties'):
                             tool['parameters']['properties'].update(resolved_schema['properties'])
                             if 'required' in resolved_schema:
-                                # Keep model-facing schemas identical across worker hash seeds.
-                                tool['parameters']['required'] = sorted(
-                                    set(tool['parameters']['required'] + resolved_schema['required'])
+                                tool['parameters']['required'] = list(
+                                    dict.fromkeys(tool['parameters']['required'] + resolved_schema['required'])
                                 )
                         elif resolved_schema.get('type') == 'array':
                             tool['parameters'] = resolved_schema  # special case for array
@@ -1534,10 +1535,6 @@ async def get_terminal_tools(
     # Find the cached spec data for this terminal
     terminal_servers = await get_terminal_servers(request)
     server_data = next((server for server in terminal_servers if server.get('id') == terminal_id), None)
-    if server_data is None:
-        # An earlier failed spec fetch is cached as an absence, so rebuild once before giving up.
-        terminal_servers = await set_terminal_servers(request)
-        server_data = next((server for server in terminal_servers if server.get('id') == terminal_id), None)
     if server_data is None:
         raise RuntimeError(f"Terminal server '{terminal_id}' is unavailable")
 
@@ -1874,7 +1871,7 @@ async def execute_tool_server(
             final_url = final_url.replace(f'{{{key}}}', quote(str(value), safe=''))
 
         if query_params:
-            final_url = f'{final_url}?{urlencode(query_params)}'
+            final_url = f'{final_url}?{urlencode(query_params, doseq=True)}'
 
         request_body_content = operation.get('requestBody', {}).get('content')
         if request_body_content and params:

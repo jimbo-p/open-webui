@@ -172,9 +172,7 @@ async def test_native_tool_checkpoint_survives_incremental_stream_persistence():
     try:
         for content in ('The answer', 'The answer is ready.'):
             reply = {'type': 'message', 'content': [{'type': 'output_text', 'text': content}]}
-            await tasks.save_response_stream(
-                redis, 'checkpoint-task', 'checkpoint-chat', 'reply', output + [reply]
-            )
+            await tasks.save_response_stream(redis, 'checkpoint-task', 'checkpoint-chat', 'reply', output + [reply])
         saved = (await tasks.get_response_streams_by_chat_id(redis, 'checkpoint-chat'))[0]
         messages = [{'role': 'user', 'content': 'Continue the investigation'}, {'role': 'assistant', **saved}]
         kept, summary = compaction._apply_latest_summary_checkpoint(messages)
@@ -208,17 +206,29 @@ async def test_native_dispatch_history_survives_incremental_stream_persistence()
     # The execution path resolves again after approval; this must remain idempotent.
     assert resolve_tool_call(call, tools) is None
     assert call['provider_function'] == provider_function
-    output = [{
-        'type': 'function_call', 'id': call['id'], 'call_id': call['id'],
-        **call['function'], 'provider_function': call['provider_function'], 'status': 'pending',
-    }]
+    output = [
+        {
+            'type': 'function_call',
+            'id': call['id'],
+            'call_id': call['id'],
+            **call['function'],
+            'provider_function': call['provider_function'],
+            'status': 'pending',
+        }
+    ]
     redis = FakeRedis(decode_responses=True)
     await tasks.redis_save_task(redis, 'dispatch-task', 'dispatch-chat')
     try:
         await tasks.save_response_stream(redis, 'dispatch-task', 'dispatch-chat', 'reply', output)
         output[0]['status'] = 'completed'
-        output.append({'type': 'function_call_output', 'call_id': call['id'],
-                       'output': [{'type': 'input_text', 'text': 'Matching rows'}], 'status': 'completed'})
+        output.append(
+            {
+                'type': 'function_call_output',
+                'call_id': call['id'],
+                'output': [{'type': 'input_text', 'text': 'Matching rows'}],
+                'status': 'completed',
+            }
+        )
         await tasks.save_response_stream(redis, 'dispatch-task', 'dispatch-chat', 'reply', output)
         saved = (await tasks.get_response_streams_by_chat_id(redis, 'dispatch-chat'))[0]['output']
         assert saved == output

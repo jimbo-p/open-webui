@@ -155,9 +155,9 @@ async def cleanup_task(redis, task_id: str, id=None):
         if not item_tasks[id]:  # If no tasks left for this ID, remove the entry
             item_tasks.pop(id, None)
 
-
     if redis:
         await redis_cleanup_task(redis, task_id, id)
+
 
 async def create_task(redis, coroutine, id=None, task_id=None):
     """

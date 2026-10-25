@@ -72,7 +72,9 @@ async def test_introspection_does_not_open_browser_session_endpoint_to_machine_c
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('case', ['missing', 'malformed', 'expired', 'revoked', 'unknown_type', 'inactive', 'pending', 'unknown_key'])
+@pytest.mark.parametrize(
+    'case', ['missing', 'malformed', 'expired', 'revoked', 'unknown_type', 'inactive', 'pending', 'unknown_key']
+)
 async def test_introspection_rejects_invalid_credentials_and_inactive_users(identity, case, monkeypatch):
     credential = token()
     if case == 'missing':
@@ -81,7 +83,9 @@ async def test_introspection_rejects_invalid_credentials_and_inactive_users(iden
         credential = 'invalid-signature'
     elif case == 'expired':
         # Exercise JWT expiry through the real decoder.
-        credential = auth.create_token({'id': 'u1', 'typ': 'automation', 'session_stamp': 'current'}, timedelta(seconds=-1))
+        credential = auth.create_token(
+            {'id': 'u1', 'typ': 'automation', 'session_stamp': 'current'}, timedelta(seconds=-1)
+        )
     elif case == 'revoked':
         identity[2].session_stamp = 'new-stamp'
     elif case == 'unknown_type':
