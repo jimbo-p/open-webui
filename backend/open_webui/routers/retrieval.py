@@ -67,6 +67,7 @@ from open_webui.models.knowledge import Knowledges
 
 # Document loaders
 from open_webui.retrieval.loaders.youtube import YoutubeLoader, YoutubeTranscriptError
+from open_webui.retrieval.skip_extraction import skip_extraction_reason, skip_extraction_stub
 from open_webui.retrieval.utils import (
     build_loader_from_config,
     filter_accessible_collections,
@@ -1567,6 +1568,39 @@ def has_vector_results(result) -> bool:
     return bool(result and result.ids and result.ids[0])
 
 
+async def _store_without_extraction(request, file, user, db, reason: str):
+    """Keep the original blob without Tika or embeddings; the caller marks completion."""
+    stub = skip_extraction_stub(file.filename, file.id, reason)
+    file_hash = file.hash or (file.meta or {}).get('file_hash')
+    log.info('Skipping text extraction for %s (%s)', file.filename, reason)
+    await Files.update_file_data_by_id(
+        file.id,
+        {
+            'content': stub,
+            'error': None,
+            'skip_extraction': True,
+            'skip_extraction_reason': reason,
+        },
+        db=db,
+    )
+    if file_hash:
+        await Files.update_file_hash_by_id(file.id, file_hash, db=db)
+    await publish_event(
+        request,
+        EVENTS.RETRIEVAL_CONTENT_PROCESSED,
+        actor=user,
+        subject_id=file.id,
+        subject_type='file',
+        data={'collection_name': None, 'filename': file.filename, 'skip_extraction': reason},
+    )
+    return {
+        'status': True,
+        'collection_name': None,
+        'filename': file.filename,
+        'content': stub,
+    }
+
+
 @router.post('/process/file')
 async def process_file(
     request: Request,
@@ -1613,6 +1647,10 @@ async def index_file(
             else:
                 await _validate_collection_access([collection_name], user, access_type='write')
             collection_names = [collection_name]
+
+            skip_reason = skip_extraction_reason(file.filename, (file.meta or {}).get('content_type'))
+            if skip_reason:
+                return await _store_without_extraction(request, file, user, db, skip_reason)
 
             if form_data.content:
                 # Update the content in the file
@@ -3043,6 +3081,7 @@ async def process_files_batch(
     file_errors: list[BatchProcessFilesResult] = []
     file_updates: list[FileUpdateForm] = []
     seen_hashes: set[str] = set()
+    skipped_results: list[BatchProcessFilesResult] = []
 
     # Prepare all documents first
     all_docs: list[Document] = []
@@ -3068,6 +3107,13 @@ async def process_files_batch(
                         error='Permission denied: not file owner',
                     )
                 )
+                continue
+
+            skip_reason = skip_extraction_reason(db_file.filename, (db_file.meta or {}).get('content_type'))
+            if skip_reason:
+                await _store_without_extraction(request, db_file, user, db, skip_reason)
+                await Files.update_file_data_by_id(db_file.id, {'status': 'completed', 'error': None}, db=db)
+                skipped_results.append(BatchProcessFilesResult(file_id=file.id, status='completed'))
                 continue
 
             text_content = file.data.get('content', '')
@@ -3128,7 +3174,7 @@ async def process_files_batch(
                 file_result.status = 'failed'
                 file_errors.append(BatchProcessFilesResult(file_id=file_result.file_id, status='failed', error=str(e)))
 
-    response = BatchProcessFilesResponse(results=file_results, errors=file_errors)
+    response = BatchProcessFilesResponse(results=file_results + skipped_results, errors=file_errors)
     await publish_event(
         request,
         EVENTS.RETRIEVAL_CONTENT_PROCESSED,

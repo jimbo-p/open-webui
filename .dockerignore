@@ -12,6 +12,10 @@ vite.config.ts.timestamp-*
 __pycache__
 .idea
 venv
+**/venv
+/build
+.pytest_cache
+.ruff_cache
 _old
 uploads
 .ipynb_checkpoints

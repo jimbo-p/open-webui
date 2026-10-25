@@ -207,6 +207,7 @@ ignore-words-list = 'ans'
 
 [dependency-groups]
 dev = [
+    "fakeredis>=2.32,<3",
     "pytest-asyncio>=1.0.0",
     "ruff>=0.15.5",
 ]

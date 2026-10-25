@@ -13,7 +13,6 @@
 	import { WEBUI_BASE_URL, DEFAULT_CAPABILITIES } from '$lib/constants';
 
 	import { getTools } from '$lib/apis/tools';
-	import { getSkills } from '$lib/apis/skills';
 	import { getFunctions } from '$lib/apis/functions';
 	import { getModelsDefaults } from '$lib/apis/configs';
 	import { getLanguages } from '$lib/i18n';
@@ -33,7 +32,6 @@
 	import Tags from '$lib/components/common/Tags.svelte';
 	import Knowledge from '$lib/components/workspace/Models/Knowledge.svelte';
 	import ToolsSelector from '$lib/components/workspace/Models/ToolsSelector.svelte';
-	import SkillsSelector from '$lib/components/workspace/Models/SkillsSelector.svelte';
 	import FiltersSelector from '$lib/components/workspace/Models/FiltersSelector.svelte';
 	import ActionsSelector from '$lib/components/workspace/Models/ActionsSelector.svelte';
 	import Capabilities from '$lib/components/workspace/Models/Capabilities.svelte';
@@ -221,8 +219,6 @@
 
 	let knowledge = [];
 	let toolIds = [];
-	let skillIds = [];
-	let skillsList = [];
 
 	let filterIds = [];
 	let defaultFilterIds = [];
@@ -423,14 +419,6 @@
 		} else {
 			if (modelInfo.meta.toolIds) {
 				delete modelInfo.meta.toolIds;
-			}
-		}
-
-		if (skillIds.length > 0) {
-			modelInfo.meta.skillIds = skillIds;
-		} else {
-			if (modelInfo.meta.skillIds) {
-				delete modelInfo.meta.skillIds;
 			}
 		}
 
@@ -705,7 +693,6 @@
 			});
 
 			toolIds = model?.meta?.toolIds ?? [];
-			skillIds = model?.meta?.skillIds ?? [];
 			filterIds = model?.meta?.filterIds ?? [];
 			defaultFilterIds = model?.meta?.defaultFilterIds ?? [];
 			actionIds = model?.meta?.actionIds ?? [];
@@ -750,7 +737,6 @@
 	onMount(async () => {
 		languages = await getLanguages();
 		await tools.set((await getTools(localStorage.token).catch(() => null)) ?? []);
-		skillsList = (await getSkills(localStorage.token).catch(() => null)) ?? [];
 		if (!$functions) {
 			await functions.set(await getFunctions(localStorage.token));
 		}
@@ -1641,11 +1627,6 @@
 									<ToolsSelector
 										bind:selectedToolIds={toolIds}
 										tools={$tools ?? []}
-										disabled={readOnly}
-									/>
-									<SkillsSelector
-										bind:selectedSkillIds={skillIds}
-										skills={skillsList}
 										disabled={readOnly}
 									/>
 									{#if ($functions ?? []).some((func) => func.type === 'filter')}

@@ -175,6 +175,19 @@ def config_updates(data: dict, key_map: dict[str, str]) -> dict:
     return {key_map[field]: value for field, value in data.items() if field in key_map}
 
 
+class VerifiedIdentityResponse(BaseModel):
+    id: str
+    email: str
+    name: str
+    role: str
+
+
+@router.get('/verify', response_model=VerifiedIdentityResponse)
+async def verify_identity(user=Depends(get_verified_user)):
+    """Resolve a tool caller without requiring or issuing a human browser session."""
+    return {'id': user.id, 'email': user.email, 'name': user.name, 'role': user.role}
+
+
 @router.get('/', response_model=SessionUserInfoResponse)
 async def get_session_user(
     request: Request,
