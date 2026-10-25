@@ -10,26 +10,26 @@ Earlier exact equivalents include MCP error logging, external citations, iframe 
 
 Three additional changes are replaced by native implementations rather than identical patches:
 
-| Previous carry | 0.12.1 decision |
-| --- | --- |
-| HTTP-safe UUID fixes (#32239 and the later terminal/realtime completion) | Use native UUID helpers throughout. The earlier terminal formatting-only patch is also unnecessary. |
-| Skill-import modal teardown fix (#32315) | Use the current native import/preview lifecycle, which no longer uses the problematic keyed remount. |
-| First long-tool-run compaction patch (#32308) | Use the complete native implementation, including persistence of compaction checkpoints into later turns. Do not retain the earlier partial patch. |
+| Previous carry                                                           | 0.12.1 decision                                                                                                                                    |
+| ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| HTTP-safe UUID fixes (#32239 and the later terminal/realtime completion) | Use native UUID helpers throughout. The earlier terminal formatting-only patch is also unnecessary.                                                |
+| Skill-import modal teardown fix (#32315)                                 | Use the current native import/preview lifecycle, which no longer uses the problematic keyed remount.                                               |
+| First long-tool-run compaction patch (#32308)                            | Use the complete native implementation, including persistence of compaction checkpoints into later turns. Do not retain the earlier partial patch. |
 
 The custom lazy-tool-loading/provider adapter experiment remains removed. Tool Search configuration is not changed by this upgrade. Historical PRs and branches remain available as an audit trail; their patches are absent from the new overlay.
 
 ## Custom behavior retained
 
-| Area | Remaining change and reason |
-| --- | --- |
-| Corporate image | Trust the corporate CA in frontend and Python runtime stages; retain the configurable 8 GiB frontend heap and Docker context exclusions. |
-| File handling | Keep spreadsheets, CSV/TSV, GIS/CAD, scientific arrays, and DXP/PBIX/PBIT as original files without extraction/embedding. Preserve the actual MIME type of compressed uploads. |
-| Configuration | Keep the short-lived snapshot cache with defensive copies, transaction-aware invalidation, and direct reads for settings updated as whole collections. Native 0.12.1 still performs individual uncached reads. |
-| Streaming | Keep incremental Redis response persistence, expiry/eviction recovery, cleanup after Redis failures, incremental tool UI events, absolute output positions, and preservation of previous tool rounds. Keep base64 model input images out of these UI events and surface provider error responses. |
-| Notes | Seed empty collaborative history from externally authored stored note JSON using deterministic CRDT identifiers. |
-| Tools and automations | Keep deterministic OpenAPI required-field ordering, one retry after a cached terminal-spec failure, and protection against scheduled runs creating further automations. |
-| Chat | Wait for tool/default initialization before first submission, reject overlapping submissions during that wait, retain parameterized prompt initialization, use the currently selected model for single-model regeneration, and retain the initial title task's model context. |
-| UI | Preserve knowledge-view pagination reset, document MIME editor semantics, and reactive inline Markdown streaming behavior. |
+| Area                  | Remaining change and reason                                                                                                                                                                                                                                                                       |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Corporate image       | Trust the corporate CA in frontend and Python runtime stages; retain the configurable 8 GiB frontend heap and Docker context exclusions.                                                                                                                                                          |
+| File handling         | Keep spreadsheets, CSV/TSV, GIS/CAD, scientific arrays, and DXP/PBIX/PBIT as original files without extraction/embedding. Preserve the actual MIME type of compressed uploads.                                                                                                                    |
+| Configuration         | Keep the short-lived snapshot cache with defensive copies, transaction-aware invalidation, and direct reads for settings updated as whole collections. Native 0.12.1 still performs individual uncached reads.                                                                                    |
+| Streaming             | Keep incremental Redis response persistence, expiry/eviction recovery, cleanup after Redis failures, incremental tool UI events, absolute output positions, and preservation of previous tool rounds. Keep base64 model input images out of these UI events and surface provider error responses. |
+| Notes                 | Seed empty collaborative history from externally authored stored note JSON using deterministic CRDT identifiers.                                                                                                                                                                                  |
+| Tools and automations | Keep deterministic OpenAPI required-field ordering, one retry after a cached terminal-spec failure, and protection against scheduled runs creating further automations.                                                                                                                           |
+| Chat                  | Wait for tool/default initialization before first submission, reject overlapping submissions during that wait, retain parameterized prompt initialization, use the currently selected model for single-model regeneration, and retain the initial title task's model context.                     |
+| UI                    | Preserve knowledge-view pagination reset, document MIME editor semantics, and reactive inline Markdown streaming behavior.                                                                                                                                                                        |
 
 No Python runtime dependency or startup-script change is required relative to the prior deployed image. Native frontend dependency changes, including the merge editor and Mermaid update, come from the release lockfile and are installed during the frontend build.
 
