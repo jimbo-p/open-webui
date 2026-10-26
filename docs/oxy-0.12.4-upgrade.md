@@ -126,9 +126,9 @@ Both ECS deployments completed and all old containers exited successfully.
   extraction skipped and downloaded bytes identical to the originals. This
   verifies original-file preservation, not parsing by Excel or Spotfire.
 - An API-created note retained its content on first editor open and reload.
-- A fresh browser profile without a stored locale selected English and rendered
-  a reply without errors. This also avoided the empty-locale initialization
-  error seen in the 0.12.3 baseline's fresh test profile.
+- A fresh browser profile with navigator locale `en-US` and no stored locale
+  selected English and rendered a reply without errors. This also avoided the
+  empty-locale initialization error seen in the 0.12.3 baseline's fresh test profile.
 - API-key identity verification and a real read-only MCP app-listing call
   succeeded. Dedicated ingestion routing, upload, background processing,
   knowledge attachment, source download through the web service, and vector
@@ -153,3 +153,122 @@ operation or saved default direct-tool selection. All personal terminal entries
 were disabled. This does not prove the saved connections are never used: name
 collisions and browser-only selections cannot be excluded. Managed tool servers
 are unaffected, and the existing production setting is preserved.
+
+## Production verification and cutover
+
+New production traffic moved to the verified image at 23:52:54 UTC on
+2026-10-25. A temporary full-capacity fleet of 12 serving and two ingestion tasks
+allowed existing chats and file processing to continue on the preceding image
+while new requests used 0.12.4. Both public hostnames, all three resolved ALB
+addresses, and nginx log attribution confirmed the new routes.
+
+Serving keeps its existing sticky-session behavior. Separate nonmatching holding
+rules keep both target groups associated with the ALB during the traffic switch;
+ingestion uses nonsticky weighted forwarding. The permanent service settings and
+all existing target-group attributes are preserved. Temporary workers alone use
+the existing `TIMER_POLL_INTERVAL=86400` environment setting after their first
+poll; permanent workers continue normal scheduling. This prevents temporary
+workers from continually acquiring new scheduled work during their later drain.
+
+The drain tracks exact task, assistant-message, and file IDs, checks terminal
+outcomes, and extends the captured set after a scheduled-work boundary. The
+initial eight current uploads completed without errors. An unchanged baseline
+of 480 historical pending-file records predating every original worker is
+excluded from blocking; any changed historical record re-enters the check.
+No historical file or Redis state was cleaned up as part of the upgrade.
+
+The captured pre-upgrade work drained without errors or missing results,
+including all eight midnight automations. Permanent serving revision `442` and
+ingestion revision `20` then completed their image-only rollout at the original
+12+2 capacity. Normal scheduler polling is unchanged. All 14 preceding 0.12.3
+tasks stopped normally, with exit code zero from all 42 containers.
+
+Public traffic returned to the permanent 0.12.4 services at 00:21:09 UTC on
+2026-10-26. Fresh requests through both hostnames and all three ALB addresses
+were independently attributed to permanent tasks in nginx logs; none reached
+the temporary fleet. The temporary workers stayed alive to finish their
+captured work before retirement.
+
+The temporary drain followed the full parent/subagent family, including actual
+Redis wrapper tasks, chat JSON and normalized assistant records, and pending
+internal continuations. Five child runs completed without recorded assistant
+errors; one reached the existing 30-tool-call limit, whose code and configured
+value are unchanged from 0.12.3.
+That exact child/error fingerprint was reviewed without clearing its error.
+
+The parent then paused on native `ask_user`. Its unanswered question, `done=false`,
+and saved resume context were preserved. Source review confirmed that answering
+uses a fresh HTTP request to reconstruct context from the database and start a
+new task on the serving worker; it requires no callback in the temporary worker.
+Only that exact assistant/call and unchanged saved snapshot were accepted as a
+durable pause, not as completed work. All ten captured uploads had completed.
+After more than 76 seconds with no live family tasks or response streams, no
+pending internal continuations, and no missing records, temporary retirement
+started at 00:44:06 UTC. No user work was cancelled or marked complete by the
+rollout.
+
+All 14 temporary tasks reached `STOPPED` by 00:51:26 UTC, with exit code zero
+from all 42 containers. Their shutdowns were initiated by the ECS service
+scheduler after the guarded retirement.
+
+Temporary-resource cleanup completed at 00:53:57 UTC. Both original main-rule
+actions were restored exactly, both temporary services and target groups were
+removed, and both holding rules were deleted. The permanent fleet remains at
+12 serving and two ingestion tasks; dev remains at one of each.
+Both temporary task-definition revisions were deactivated after their services
+and running family tasks were confirmed absent.
+
+Production checks passed:
+
+- All 14 candidate tasks passed health, readiness, database connectivity, version,
+  image-digest, and unchanged-sidecar checks. Startup logs contained no new error,
+  traceback, or application-load failure markers.
+- Existing 445 configuration values, all 1,009 model metadata/parameter
+  fingerprints, and schema head remained unchanged. Only the same three native
+  defaults recorded for dev were added; personal direct integrations remain off.
+- API-key identity verification and a real read-only MCP app listing succeeded.
+- A disposable knowledge base and file passed dedicated ingestion routing,
+  background extraction/indexing, knowledge linking, source download through the
+  serving service, and vector retrieval. Both temporary objects were deleted.
+- A real production browser session passed a visibly rendered reply,
+  regeneration, and a linked native timestamp tool call/result with a visible
+  final answer. There were no JavaScript errors, and its test chat was deleted.
+- The Microsoft sign-in route returned a redirect to the expected provider.
+  A full corporate SSO roundtrip was not performed. The headless test browser
+  required temporary certificate-key pinning after independent certificate-chain
+  and hostname validation; no application certificate or shared setting changed.
+- The normal chat layout matched the dev/baseline comparison. The admin-only
+  release-notes dialog was dismissed locally without saving user settings.
+
+The early five-minute traffic sample recorded 2,868 target 2xx responses and no
+target 5xx datapoints. Per-minute p95 target latency was 348–418 ms, within the
+pre-cutover 125–432 ms range. Aurora writer CPU averaged 5.98% (7.15% maximum),
+compared with 6.58% (8.21% maximum) before cutover. Connections were 125–150 while
+both fleets and the scheduled batch coexisted. These are bounded release-window
+observations, not a performance guarantee or a test of every external tool.
+
+A later five-minute sample on the permanent services recorded 2,113 target 2xx
+responses, no target 5xx datapoints, per-minute p95 latency of 122–337 ms, and
+Aurora writer CPU averaging 5.95%. Repeated identity and read-only MCP probes
+returned 200 with timings near the earlier samples.
+
+Final log review identified empty-content validation rejections in a newly
+appearing `python-httpx` workload attaching files through the serving route
+(58 successful requests and nine HTTP 400 responses in the bounded audit).
+The rejecting branch is unchanged from the preceding fork. Dedicated ingestion
+attachments all returned 200 across the sampled old, temporary, and permanent
+fleets, and no retained recently modified file had failed status or the matching
+error. Logs did not expose correlatable file IDs, so the rejected inputs' ages
+and provenance could not be established. No upgrade regression was identified;
+no application code, file data, or shared settings were changed for this audit.
+
+Deployment pins were squash-merged in
+[OxyGPT PR #1268](https://dev.azure.com/oxy-well-surveillance/OpsAI/_git/oxygpt/pullrequest/1268).
+Infrastructure `master` at `fa3a68d80ea50a1d8ff8b01bf35ae627479c29cc` contains
+the verified dev, production serving/ingestion, and compatibility-wrapper pins.
+The three changed file blobs match the reviewed source exactly. No broad
+Terraform apply was performed.
+
+The retained rollback definitions are production serving `437` and ingestion
+`16`, both using
+`sha256:8ce87fcfac408cd79ec9e5ee2ed21239927708722b81a0144bfab7330d49ba65`.
