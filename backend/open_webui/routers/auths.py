@@ -8,6 +8,7 @@ import time
 import urllib
 import uuid
 from ssl import CERT_NONE, CERT_REQUIRED, PROTOCOL_TLS
+from typing import Literal
 
 import jwt
 from aiohttp import BasicAuth, ClientSession
@@ -79,10 +80,17 @@ from open_webui.utils.auth import (
 )
 from open_webui.utils.groups import apply_default_group_assignment
 from open_webui.utils.json_codec import JSONCodec
-from open_webui.utils.mfa import MFA_CONFIG_KEYS, MfaConfigForm, get_mfa_config, limit_account, update_mfa_config
+from open_webui.utils.mfa import (
+    MFA_CONFIG_KEYS,
+    MfaConfigForm,
+    get_auth,
+    get_mfa_config,
+    limit_account,
+    update_mfa_config,
+)
 from open_webui.utils.misc import parse_duration, validate_email_format
 from open_webui.utils.rate_limit import RateLimiter
-from pydantic import BaseModel, Field, StrictStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, ValidationError, field_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -175,17 +183,65 @@ def config_updates(data: dict, key_map: dict[str, str]) -> dict:
     return {key_map[field]: value for field, value in data.items() if field in key_map}
 
 
+class VerificationTokenClaims(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    session_stamp: str | None
+    typ: Literal['session', 'automation', 'subagent']
+    auth_method: str | None = None
+    mfa_verified: bool | None = None
+    exp: int | float | None = None
+    iat: int | float | None = None
+    jti: str | None = None
+
+
+class VerificationContext(BaseModel):
+    version: Literal[1] = 1
+    user_id: str
+    claims: VerificationTokenClaims
+
+
 class VerifiedIdentityResponse(BaseModel):
     id: str
     email: str
     name: str
     role: str
+    verification_context: VerificationContext | None = None
 
 
-@router.get('/verify', response_model=VerifiedIdentityResponse)
-async def verify_identity(user=Depends(get_verified_user)):
+@router.get('/verify', response_model=VerifiedIdentityResponse, response_model_exclude_unset=True)
+async def verify_identity(
+    request: Request, include_verification_context: bool = False, user=Depends(get_verified_user)
+):
     """Resolve a tool caller without requiring or issuing a human browser session."""
-    return {'id': user.id, 'email': user.email, 'name': user.name, 'role': user.role}
+    identity = {'id': user.id, 'email': user.email, 'name': user.name, 'role': user.role}
+    if include_verification_context:
+        if request.state.auth_type == 'jwt':
+            # Carry the validated credential's lineage. Reading a newer account
+            # stamp here could revive a credential revoked after authentication.
+            source = request.state.claims
+            claims = {key: source[key] for key in ('auth_method', 'mfa_verified', 'exp', 'iat', 'jti') if key in source}
+            claims.update(session_stamp=source.get('session_stamp'), typ=source.get('typ', 'session'))
+        else:
+            # API keys have no JWT lineage. Bind the short-lived verification
+            # context to the active account's current revocation stamp.
+            account = await get_auth(user.id)
+            now = int(time.time())
+            claims = {
+                'session_stamp': account.session_stamp,
+                'typ': 'automation',
+                'iat': now,
+                'exp': now + 300,
+                'jti': str(uuid.uuid4()),
+            }
+        try:
+            verified_claims = VerificationTokenClaims.model_validate(claims)
+        except ValidationError:
+            # Never coerce a source claim (for example a truthy string into an
+            # MFA assertion) when another service will use it in a new token.
+            raise HTTPException(401, 'The credential cannot supply a verification context.') from None
+        identity['verification_context'] = {'version': 1, 'user_id': user.id, 'claims': verified_claims}
+    return identity
 
 
 @router.get('/', response_model=SessionUserInfoResponse)
