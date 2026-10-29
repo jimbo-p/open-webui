@@ -15,17 +15,17 @@ The source audit found no remaining current fork customization fully replicated
 by 0.12.5. Both commit equivalence and source behavior were checked. Patches
 retired during earlier upgrades remain retired.
 
-| Files | Retained purpose |
-| --- | --- |
-| `.dockerignore`, `Dockerfile`, `corp-ca.crt` | Corporate trust, build-memory setting and Docker context exclusions. |
+| Files                                                                                        | Retained purpose                                                                                                                                 |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `.dockerignore`, `Dockerfile`, `corp-ca.crt`                                                 | Corporate trust, build-memory setting and Docker context exclusions.                                                                             |
 | `backend/open_webui/retrieval/skip_extraction.py`, `backend/open_webui/routers/retrieval.py` | Preserve original spreadsheet, structured, scientific and binary files without extraction, with permission checks and durable knowledge linking. |
-| `backend/open_webui/routers/auths.py` | Credential-owner `/verify` endpoint and strict micro-app delegation lineage. |
-| `backend/open_webui/tasks.py`, `backend/open_webui/main.py` | Local task cleanup before Redis cleanup and no-task response-stream cleanup. |
-| `backend/open_webui/tools/builtin.py`, `backend/open_webui/utils/tools.py` | Scheduled runs cannot create or manage further automations. |
-| `src/lib/components/chat/Chat.svelte` | Wait for model defaults at both submission boundaries and reject duplicate sends during that wait. |
-| `src/lib/components/chat/MessageInput.svelte` | Compressed image uploads use the actual blob MIME type. |
-| `src/lib/components/workspace/Models/ModelEditor.svelte` | Model Skills picker remains removed. |
-| `scripts/clear_model_skills.py`, tests and `fakeredis` development dependency | Preserve manual maintenance capability and retained-fix regression coverage. The cleanup utility is not part of upgrade execution. |
+| `backend/open_webui/routers/auths.py`                                                        | Credential-owner `/verify` endpoint and strict micro-app delegation lineage.                                                                     |
+| `backend/open_webui/tasks.py`, `backend/open_webui/main.py`                                  | Local task cleanup before Redis cleanup and no-task response-stream cleanup.                                                                     |
+| `backend/open_webui/tools/builtin.py`, `backend/open_webui/utils/tools.py`                   | Scheduled runs cannot create or manage further automations.                                                                                      |
+| `src/lib/components/chat/Chat.svelte`                                                        | Wait for model defaults at both submission boundaries and reject duplicate sends during that wait.                                               |
+| `src/lib/components/chat/MessageInput.svelte`                                                | Compressed image uploads use the actual blob MIME type.                                                                                          |
+| `src/lib/components/workspace/Models/ModelEditor.svelte`                                     | Model Skills picker remains removed.                                                                                                             |
+| `scripts/clear_model_skills.py`, tests and `fakeredis` development dependency                | Preserve manual maintenance capability and retained-fix regression coverage. The cleanup utility is not part of upgrade execution.               |
 
 Upstream rewrites model-default selection to preserve manual picks and combine
 defaults across models. It still does not wait for those defaults at submission
@@ -92,12 +92,12 @@ At preparation, all four services were stable and all OWUI containers matched
 the maintained image `microapp-auth-20261028-2b9989cd`, digest
 `sha256:d23cede06d11a1952db07f8cf1778869cf635708d1d24e110743839833bd6177`.
 
-| Environment | Service | Task definition | Running capacity |
-| --- | --- | --- | --- |
-| Dev | Serving | `oxygpt-open-webui-task:449` | 2 |
-| Dev | Ingestion | `oxygpt-open-webui-ingest-task:25` | 1 |
-| Production | Serving | `oxygpt-open-webui-task:450` | 12 |
-| Production | Ingestion | `oxygpt-open-webui-ingest-task:28` | 2 |
+| Environment | Service   | Task definition                    | Running capacity |
+| ----------- | --------- | ---------------------------------- | ---------------- |
+| Dev         | Serving   | `oxygpt-open-webui-task:449`       | 2                |
+| Dev         | Ingestion | `oxygpt-open-webui-ingest-task:25` | 1                |
+| Production  | Serving   | `oxygpt-open-webui-task:450`       | 12               |
+| Production  | Ingestion | `oxygpt-open-webui-ingest-task:28` | 2                |
 
 Startup database migrations are explicitly disabled. Preserve sidecars, service
 configuration and full capacity. Retain current production definitions 450/28
@@ -132,3 +132,21 @@ paths can return frontend HTML with HTTP 200.
    cleanup results and deliberately retained resources.
 
 Build, dev and production results will be appended as their gates complete.
+
+## Source validation
+
+On application commit `769a737db5a0419c95420048a1fe481115635b92`, all 102
+backend regressions and six frontend tests pass. Six extracted submission,
+default-selection and MIME checks pass. A real disposable SQLite probe verifies
+note conversion, attachment/version preservation, nested page edits and reload,
+and rejection of stale page updates. Ruff formatting passes for 318 files;
+CI F-rule logic checks, full Prettier and the native encryption checksum pass.
+The i18n parser produces no source changes.
+
+These checks used Python 3.12.15, Node 22.23.4, isolated SQLite/static/data
+locations and fake Redis with Lua support. They did not write to shared
+application databases. The manual skill cleanup utility was not executed.
+Build commit `11e39ad56c301cf452f16eb35eeb5738a5eeb751` adds only AGENTS/release
+documentation to that validated application tree; all application, build,
+dependency and workflow blobs are identical. Subsequent evidence/formatting
+commits update documentation only.
