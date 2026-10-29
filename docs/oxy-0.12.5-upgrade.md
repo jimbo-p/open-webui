@@ -74,12 +74,14 @@ concurrent old/new note writers can diverge. Existing WebSockets survive a
 traffic switch. The notes feature flag alone cannot freeze existing socket
 writers, and there is no native switch disabling pages independently.
 
-Production gates therefore include recoverable note snapshots, active note
-document sessions in websocket Redis, and pending document-save tasks. Do not
-probe real production notes with the candidate before cutover. If old note
-writers cannot be quiesced safely, hold the production move. Test legacy content,
-attachments, new/nested pages, concurrent edits, reconnect, reload and recovery
-with disposable dev notes.
+The production plan uses the established full-capacity fleet handoff: warm the
+candidate, redirect new traffic, let captured work finish, then retire legacy
+containers. For the 6 PM after-hours window, the user explicitly accepts the
+low likelihood of overlapping note editing and prefers this normal handoff over
+a maintenance outage or additional application patches. Observe and record note
+sessions and pending saves at the window, preserve captured pending work, and
+retain recovery evidence. This is acceptance of the native rolling-upgrade risk,
+not evidence that mixed-version note writes are compatible.
 
 After conversion, an image rollback alone is insufficient for note compatibility.
 Preserve converted rows and subsequent edits, stop conflicting note writes, and
@@ -121,7 +123,7 @@ paths can return frontend HTML with HTTP 200.
    duplicate-send prevention, original CSV/XLSX/DXP preservation, notes, dedicated
    ingestion, knowledge linking/download/retrieval, and config/model fingerprints.
 5. Schedule only reviewed orchestration that verifies approval, dev results,
-   source/image provenance, production baseline, note safety and the production
+   source/image provenance, production baseline, the accepted note risk and the production
    time. Preserve active chats, uploads, scheduled work and subagent families;
    verify routing and actual container exits before retiring old fleets.
 6. Update the separate OxyGPT repository's dev/prod serving/ingestion Terraform
@@ -150,3 +152,67 @@ Build commit `11e39ad56c301cf452f16eb35eeb5738a5eeb751` adds only AGENTS/release
 documentation to that validated application tree; all application, build,
 dependency and workflow blobs are identical. Subsequent evidence/formatting
 commits update documentation only.
+
+## Tested and published image
+
+The native maintained Dockerfile was built directly from the committed archive
+at `11e39ad56c301cf452f16eb35eeb5738a5eeb751`, with full CPU runtime,
+`USE_SLIM=false`, `USE_CUDA=false`, `USE_OLLAMA=false`, `BUILD_CHANNEL=main`,
+and that exact revision in `BUILD_HASH` and the OCI revision label. The archive
+SHA256 is `4b17de34a55dfadabb3096849e9431d71abd17bb42a307e6dd79c4a8d620a6b4`.
+
+- ECR tag: `open-webui:v0.12.5-oxy1`.
+- Immutable registry digest: `sha256:83f92c311fb924bec6085e8be7992ebad2a44cbdc80022abc13459c7b492f522`.
+- Image config digest: `sha256:396c292fec659992f060b474722749568fbdc61a1505e6445defd684eab52192`.
+- Runtime Python: 3.12.16, from the native Python 3.12 image baseline.
+
+All 102 backend regressions pass inside this actual full image. Its 291 backend
+Python files match committed source, all 117 pinned requirements are satisfied,
+`pip check` passes, all eight corporate certificates are trusted, and the native
+encryption checksum matches. An isolated boot with disposable SQLite and no
+network passes homepage, health, readiness, database health and version probes.
+
+Publication used the established native ECR API path. Manifest readback and a
+fresh registry pull match the tested config and all 21 root filesystem layers.
+Origin was synchronized before the build and rechecked before publication and
+dev rollout; later commits changed documentation only. The temporary 4.4 GB
+image export and registry-login directory were removed after pull verification.
+
+## Dev validation
+
+Serving revision `451` and ingestion revision `29` run the immutable image above
+at the unchanged two-plus-one capacity. Only the application image changed;
+sidecars, service settings, environment values and secret references are
+preserved. All three captured previous tasks and their containers stopped with
+exit code zero.
+
+All 449 pre-existing configuration values and all 55 model metadata/parameter
+fingerprints are unchanged. Only the three expected native defaults were added,
+for 452 total values. Schema head remains `0bd252b206fb`. All five original
+notes retain their exact initial fingerprints; the aggregate SHA256 is
+`a4b3dcdcdbad0b4de8324ac9d5a80cc2f0153c4bcaf362a952fbfd36fe072490`.
+
+Live browser/API checks pass:
+
+- A visible chat reply, regeneration with the same model, and a real timestamp
+  tool call with linked call/result IDs and a visible final answer.
+- An immediate model switch followed by double Enter sends exactly one
+  completion to the new model. The selected alternative had no default tools;
+  nonempty default-tool selection is covered by the isolated function checks.
+- API identity/delegation checks and a real read-only managed MCP listing.
+- Composer and API CSV, XLSX and DXP uploads preserve original bytes and skip
+  extraction. Dedicated ingestion, processing, knowledge linking, affected-only
+  API responses, paginated membership, source download and vector retrieval work.
+- Both held-open 0.12.4 note windows automatically reload into 0.12.5. Legacy
+  attachments and versions survive conversion. Two independent browser sessions
+  retain concurrent edits, catch up after offline/reconnect, and save again.
+  Nested/page creation, edits, reload and stale-edit rejection pass.
+- No JavaScript errors appeared. The release dialog was dismissed locally;
+  saved user settings were not changed. A full corporate SSO roundtrip was not
+  part of these checks.
+
+All 20 task-owned application objects were deleted: two chats, eleven files,
+one knowledge base and six notes. Final database/vector checks found no owned
+objects, normalized messages, links or grants. Ten captured S3 paths returned
+HEAD 404; the remaining legacy file had API-confirmed native storage deletion.
+Private harness artifacts remain only until sanitized evidence is archived.

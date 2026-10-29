@@ -6,6 +6,9 @@ This repository is the maintained OxyGPT application fork. `origin` is
 custom fix is now native, compare with the official upstream release, not with
 another branch of our fork.
 
+Use neutral, task-focused names and text for branches, commits, pull requests,
+tags and release metadata. Do not add assistant branding or authorship trailers.
+
 On the home server, read `/home/coomie/.codex/runbooks/work.md` before access,
 testing, or Git operations. Infrastructure and deployment belong to the separate
 `/home/coomie/oxygpt` repository; read its `AGENTS.md` before working there.
