@@ -257,9 +257,11 @@ the tested digest above. Its syntax, route/authentication/limit checks and a
 same-connection 35-second idle probe passed in isolation and in dev.
 
 By 06:30:28 UTC, the two owned temporary services were inactive and both
-temporary target groups and holding rules were absent. AWS accepted deletion
-of the two dedicated temporary task definitions; their metadata remains
-`DELETE_IN_PROGRESS` while an independent verifier checks for final absence.
+temporary target groups and holding rules were absent. At 07:14:46 UTC, an
+independent verifier confirmed that both dedicated temporary task definitions
+were absent as well, rechecked every owned runtime resource, and retained the
+28-task/84-container zero-exit evidence. The completed verifier removed its own
+unit and inputs while preserving the audit evidence.
 Current release images, prior production definitions `450`/`28`, the preceding
 image, and encrypted Aurora recovery history are retained. The separate
 infrastructure release report tracks final proxy rollout and metadata cleanup.
