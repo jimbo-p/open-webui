@@ -1,6 +1,6 @@
 # Oxy Open WebUI 0.12.5 upgrade
 
-The approved candidate imports exact official
+The approved release imports exact official
 [Open WebUI 0.12.5](https://github.com/open-webui/open-webui/releases/tag/v0.12.5),
 `f7ac7ee10962ddec0017f5c29b6740d9b9c5faca`, while retaining the current Oxy
 overlay from fork `origin/main` at
@@ -133,7 +133,7 @@ paths can return frontend HTML with HTTP 200.
    workflow. Retain release images and required recovery evidence. Report exact
    cleanup results and deliberately retained resources.
 
-Build, dev and production results will be appended as their gates complete.
+Source, image, dev and production evidence is recorded below.
 
 ## Source validation
 
@@ -216,3 +216,51 @@ one knowledge base and six notes. Final database/vector checks found no owned
 objects, normalized messages, links or grants. Ten captured S3 paths returned
 HEAD 404; the remaining legacy file had API-confirmed native storage deletion.
 Private harness artifacts remain only until sanitized evidence is archived.
+
+## Production handoff
+
+The release began in the approved October 29, 2026, 6 PM America/Chicago
+window. New serving and ingestion traffic reached the tested image at
+23:06:34 UTC. The permanent services were updated to serving definition `452`
+and ingestion definition `30`, preserving twelve serving tasks, two ingestion
+tasks, all environment/secret references, sidecars and service settings.
+
+Traffic returned to the permanent services at 06:00:59 UTC on October 30.
+All fourteen preceding tasks and all 42 containers actually stopped with exit
+code zero by 05:53:44 UTC. All fourteen temporary tasks and their 42 containers
+stopped with exit code zero by 06:20:19 UTC. No chat was cancelled or marked
+complete to force this handoff; active work and its continuations drained.
+Twelve pre-existing processing records and their stored files were preserved
+for retry under the user's direction to finish the release. Their exact row
+fingerprints and transaction versions were checked before retirement; they were
+not reported as successfully indexed.
+
+Production browser/API checks passed for visible chat, a linked timestamp tool
+call, API-key identity, original CSV preservation, dedicated ingestion,
+knowledge linking, download and vector retrieval. Full corporate SSO was not
+retested. All six synthetic production objects were deleted, three stored files
+returned HEAD 404, and independent database/vector/link checks returned zero.
+The temporary browser certificate alias was removed. The 23:23 UTC validation
+snapshot retained all existing configuration, model and original-note
+fingerprints; only the three expected native defaults were added. The schema
+head remains `0bd252b206fb`. All twelve retained original objects subsequently
+returned HEAD 200 with lengths matching their stored metadata.
+
+The four-hour observer recorded 28,692 requests, including fifteen ALB-generated
+502 responses on ingestion health and no serving readiness/version failures.
+This is not a zero-error claim. The ingestion proxy's 30-second keepalive is
+shorter than the shared ALB's 1,200-second idle timeout, a configuration pattern
+covered by AWS's connection-close troubleshooting guidance. An infrastructure
+follow-up in OxyGPT PR 1307 pins the existing nginx binary/packages and changes
+only the proxy keepalive to 1,260 seconds; the OWUI application image remains
+the tested digest above. Its syntax, route/authentication/limit checks and a
+same-connection 35-second idle probe passed in isolation and in dev.
+
+By 06:30:28 UTC, the two owned temporary services were inactive and both
+temporary target groups and holding rules were absent. AWS accepted deletion
+of the two dedicated temporary task definitions; their metadata remains
+`DELETE_IN_PROGRESS` while an independent verifier checks for final absence.
+Current release images, prior production definitions `450`/`28`, the preceding
+image, and encrypted Aurora recovery history are retained. The separate
+infrastructure release report tracks final proxy rollout and metadata cleanup.
+The manual model-skills cleanup utility was never run.
