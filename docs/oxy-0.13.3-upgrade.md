@@ -1,17 +1,19 @@
 # Oxy Open WebUI 0.13.3 upgrade and dev validation
 
-Initial audit date: November 9, 2026. The user subsequently approved integrating
-exact official 0.13.3 with the retained Oxy overlay and Escape fix, building it,
-and deploying/testing it in development. Production deployment is a later
-decision. The sections below record the initial audit; the final section records
-subsequent execution and additional proposed incident work.
+Initial audit date: November 9, 2026. The user approved exact official 0.13.3
+with the retained Oxy overlay and Escape fix, followed by the concrete timer
+backpressure and builtin-tool default-inheritance fixes and development
+validation. The approved application source is
+`7e5fa4c5902d84d3b0d3c946bb5ebc8917d08486`. Final candidate-image validation
+and development deployment remain pending in this record. Production deployment
+requires a later decision.
 
 ## Exact comparison and scope
 
 - Maintained fork: `origin/main`, `0980084f77292f778c36cb6d667190f2f39890b7`.
 - Current official baseline: `upstream/v0.12.5`,
   `f7ac7ee10962ddec0017f5c29b6740d9b9c5faca`.
-- Proposed official release: `upstream/v0.13.3`,
+- Approved official release: `upstream/v0.13.3`,
   `b0e6098e940942281d9c83f3529ea117287a3a22`.
 - Infrastructure: OxyGPT `origin/master`,
   `0cc8170dae16b7568c93f14dd7bb0e1406513855`.
@@ -22,7 +24,7 @@ not another fork branch or unreleased upstream development commits.
 Both repositories were fetched and pulled before the audit. The pre-existing
 uncommitted infrastructure `AGENTS.md` edits were preserved.
 
-The complete current overlay against official 0.12.5 contains 28 paths,
+The complete pre-upgrade overlay against official 0.12.5 contains 28 paths,
 2,808 inserted lines and 29 removed lines. Most added lines are certificates,
 tests and release records. Official 0.12.5 to 0.13.3 changes 670 paths, including
 translations. See the [official comparison](https://github.com/open-webui/open-webui/compare/v0.12.5...v0.13.3).
@@ -50,8 +52,13 @@ and keep retired historical implementations out of the upgrade.
 | Manual skill maintenance, `190acf344`, `0660ff6dc`, `996d52535`              | `scripts/clear_model_skills.py`                                                              | Keep selective backed-up cleanup/restoration capability. Do not run it as part of an upgrade.                                                                                         |
 | Supporting validation and release evidence                                   | `pyproject.toml`, seven existing test paths, `AGENTS.md`, five existing upgrade records      | Retain. `fakeredis` is a development/test dependency; these are not duplicate runtime implementations.                                                                                |
 
-The newly requested Escape fix adds `src/lib/shortcuts.ts` and
-`src/lib/shortcuts.test.ts` to the retained overlay.
+The approved Escape fix adds `src/lib/shortcuts.ts` and
+`src/lib/shortcuts.test.ts` to the retained overlay. The separately approved
+incident fixes add runtime changes in `backend/open_webui/utils/automations.py`,
+`backend/open_webui/utils/timers.py` and `backend/open_webui/utils/models.py`,
+with regressions in `test/backend/test_timer_backpressure.py` and
+`test/backend/test_models_default_builtin_tools.py`. Their behavior and limits
+are recorded under Approved timer and model-default fixes below.
 
 ### Housekeeping candidates
 
@@ -108,9 +115,10 @@ This is already the deployed source behavior, not an active patch newly eligible
 for retirement. Do not restore an old patch automatically or claim complete
 native equivalence for this particular historical behavior.
 
-## Live deployment and configuration evidence
+## Captured deployment and configuration baseline
 
-All four services use approved maintained 0.12.5 image digest
+At the initial baseline capture, all four services used approved maintained
+0.12.5 image digest
 `sha256:83f92c311fb924bec6085e8be7992ebad2a44cbdc80022abc13459c7b492f522`.
 
 | Environment | Serving definition/capacity            | Ingestion definition/capacity               |
@@ -183,13 +191,14 @@ Preload, extraction and retrieval are separate. Preserve original-only upload
 hooks and test byte-preserving download, attachment use, knowledge linking and
 retrieval on the candidate.
 
-## Configuration decisions for a future upgrade
+## Configuration choices and unchanged preferences
 
 No new environment variable is mandatory for source compatibility.
 
 | Setting or feature                | Proposed treatment                                                                                                                                                                                                                           |
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ENABLE_DB_MIGRATIONS=false`      | Preserve steady-state setting. Run a reviewed coordinated migration separately before candidate services use the schema.                                                                                                                     |
+| `TIMER_MAX_CONCURRENT`            | Approved code default is 2 per worker, reserved before timer claims and held through the returned response futures. No extra environment seed is required. This is not a fleet-wide limit.                                                   |
 | Existing subagent caps            | Preserve saved 50/50/30/10,000. Optionally mirror as environment seeds for recovery consistency; this does not overwrite saved configuration.                                                                                                |
 | `showInputSelections`             | Recommend enabling visible selections in interface defaults. Both saved default-interface dictionaries are `{}`; environment seeding alone will not replace them or explicit user preferences. This setting change is proposed, not applied. |
 | `RAG_FULL_TEXT_CHAR_THRESHOLD`    | Review new 50,000-character default, absent from current saved config. Test small-document context/cost. Use 0 only if deliberately choosing retrieval for small files.                                                                      |
@@ -216,7 +225,7 @@ expired, API-key, automation and delegated-user checks.
 
 ## Schema and validation plan
 
-Both current databases report schema `0bd252b206fb`. Six new revisions lead to
+Both databases reported schema `0bd252b206fb` at the baseline capture. Six new revisions lead to
 native head `9f6c2a8d1b43`:
 
 1. `c41f8d9e2a10`: resource comments/reactions.
@@ -236,16 +245,16 @@ old/new-worker transition, and preserve active chats/uploads/automations and
 parent/subagent families. An image rollback alone must not be assumed to undo
 new schema or data writes.
 
-The future application scope is exact official 0.13.3 plus the retained narrow
-overlay and Escape fix. Keep native dependencies and native implementations of
-retired patches. After concrete upgrade approval, resolve any integration
-conflicts, run isolated retained-fix/backend regressions, frontend checks,
-encryption verification and an approved build. Test the actual immutable image
-in dev serving and ingestion: SSO/delegation, real tool use, immediate model
-switch/send and duplicate prevention, files/knowledge, MCP identity, scheduling,
-context compaction, reconnects, changed UX and resource usage. Recheck effective
-configuration/model/schema fingerprints. Build and deployment require a further
-conversation; no release window or execution was scheduled here.
+The approved application scope is exact official 0.13.3 plus the retained narrow
+overlay, Escape fix and the timer/model-default changes recorded below. Native
+dependencies and native implementations of retired patches remain. Source
+integration and isolated checks are complete. The actual immutable image still
+requires startup, regression and development serving/ingestion checks:
+SSO/delegation, real tool use, immediate model switch/send and duplicate
+prevention, files/knowledge, MCP identity, timers/subagents/automations, context
+compaction, reconnects, changed UX and resource usage. Recheck effective
+configuration/model/schema fingerprints. Development deployment remains pending;
+production deployment is excluded from this authorization.
 
 ## Escape fix and checks completed
 
@@ -268,15 +277,16 @@ Local application commit `a060293fca6b80a314961abe0ec9edd21f1f4e16`:
   artifact/checksum verification pass. Independent review has no remaining
   findings. No backend code changed in this commit.
 
-The Escape commit is based on current maintained 0.12.5, separate from the
-unapplied upgrade, and its three source changes also fit the corresponding
-0.13.3 implementation. No branch was pushed or PR opened, avoiding automatic
-build triggers before the requested discussion.
+The Escape commit was prepared on maintained 0.12.5 and carried into the
+approved 0.13.3 integration. The upgrade branch and
+[fork PR #14](https://github.com/jimbo-p/open-webui/pull/14) are now published.
+The initial standalone checks above are supplemented by the complete frontend
+checks recorded below.
 
-No application objects or cloud resources were created. Remote configuration
-probes ran from stdin with read-only transactions and allowlisted output. The
-task-owned temporary validation directory was removed after checks. The local
-worktree and both commits are retained for review and further authorized work.
+The initial Escape investigation created no application objects or cloud
+resources. Its remote configuration probes used read-only transactions and
+allowlisted output, and its temporary validation directory was removed. Later
+release-validation resources are tracked separately below.
 
 ## Approved dev release execution
 
@@ -290,10 +300,21 @@ exact official 0.13.3 while preserving fork ancestry and the Escape commits. All
 5,300 native paths outside the approved overlay match exact official blobs. The
 reviewed archive SHA256 is
 `6813c85d0dcd673a55bc6b4eb524abf4887ff82a49d19a05fb9650e2d9137dcc`.
-A baseline full-CPU image build was started on `permission-test` directly from
-that verified committed archive, with `BUILD_HASH` set to the full source SHA,
-`BUILD_CHANNEL=main`, and slim/CUDA/Ollama all false. This baseline is not a
-published or deployed release artifact.
+An initial full-CPU image build used that committed archive on `permission-test`,
+with its exact SHA in `BUILD_HASH`, `BUILD_CHANNEL=main`, and slim/CUDA/Ollama
+all false. That source is superseded as the final release candidate by
+`7e5fa4c5902d84d3b0d3c946bb5ebc8917d08486`. Its final image-build archive is
+16,040,979 bytes, SHA256
+`4ceb398a4fa651af1028f6883efee0a9537a0c5ed1a4135fef983ba35ab1369c`,
+and the build-relevant source manifest is
+`24a391da55ac381685d811d793e5eae9010006687dd58ee94edb0a277c6aa6e8`.
+The final full-CPU build uses that exact source SHA in `BUILD_HASH`,
+`BUILD_CHANNEL=main`, and `USE_SLIM=false`, `USE_CUDA=false`,
+`USE_OLLAMA=false`. It is running; completion and an immutable image digest are
+not yet recorded. Later documentation-only commits do not replace `7e5fa4c59`
+as the image source; build-manifest equivalence must verify that distinction.
+Actual-image checks and dev deployment evidence must be recorded against that
+final source before declaring the release validated.
 
 Frontend validation on Node 22.23.4 passes all 14 tests, native encryption
 verification, full formatting and i18n extraction/placeholder checks. A disposable
@@ -343,21 +364,97 @@ production channel messages/reactions at that snapshot, so index targets are
 small. Production conditions must be rechecked before any later production
 migration; rehearsal timings are not a zero-downtime guarantee.
 
-### Additional timer incident scope
+### Approved timer and model-default fixes
 
-During the approved upgrade work the user supplied an incident investigation and
-requested a fix preserving subagents where possible. Exact 0.13.3 still contains
-unbounded timer dispatch and full-parent loading before admission. This is a
-separate path from native subagent concurrency caps. A related missing nested
-builtin-tool default can unintentionally enable subagents when the global
-default is false.
+After reviewing the concrete additional changes, the user approved the fixes
+and development validation on November 9. Commit
+`7e5fa4c5902d84d3b0d3c946bb5ebc8917d08486`, based on `38bb12fef`, changes
+exactly three application files and two regression files.
 
-Two unapplied proposals were prepared: bounded admission/durable retry in
-`utils/automations.py` and `utils/timers.py`, and per-category global-default
-inheritance in `utils/models.py`. Planned regressions cover real PostgreSQL
-contention, large parents, bounded task growth, fairness, claim ownership,
-cancellation and explicit model overrides. Concrete approval was requested for
-these additional backend changes and dev testing. The dev rollout is held while
-that scope is assessed. Existing production jobs, settings and records remain
-unchanged. Historical running timer states are not proof of live coroutines and
-will not be automatically deleted or replayed.
+The incident investigation identified timer executions loading a large parent
+conversation before admission and accumulating without a scheduler concurrency
+bound. Exact official 0.13.3 retains that mechanism; native subagent caps do not
+govern timer dispatch. The approved changes preserve timers, automations,
+explicit subagent choices and queued work:
+
+- `utils/automations.py` reserves timer capacity before claims. The positive
+  `TIMER_MAX_CONCURRENT` default is two per worker. A dispatcher retains its
+  slot through preparation and returned local response futures, including when
+  that dispatcher is cancelled; it does not cancel the response to free space.
+- `utils/timers.py` claims only free capacity and at most one due timer per
+  parent within each batch. Busy local/Redis parents and PostgreSQL row-lock
+  contention defer the matching claim with a short jittered retry. The original
+  due time, prompt, tools, files, filters and cancellation rules remain stored.
+  An ID-only parent row lock and claim check precede full parent JSON loading.
+- Parent delivery, normalized messages and a claim-associated response marker
+  commit together. Terminal state changes and rearming are claim-fenced.
+  Handled failures after delivery preserve a registered response or store a
+  visible terminal error in both message stores; they do not replay that turn.
+- `utils/models.py` merges global `builtinTools` defaults by category, with
+  explicit model overrides winning. A missing `subagents` entry now inherits
+  the configured global false value instead of defaulting to true. Explicitly
+  enabled models remain enabled. Saved model rows are not rewritten.
+
+The bound is per worker, and parent fairness is per batch; neither is a global
+one-active-parent exclusion or an absolute memory guarantee. A short handoff
+window between parent commit and response registration still exists across
+workers. One admitted large conversation can still require substantial memory.
+Historical running timers are not automatically replayed, deleted or cancelled.
+Exactly-once external effects after a hard process death are outside this fix.
+
+### Final source validation
+
+All 119 isolated backend regressions pass under Python 3.12: the 102 retained
+cases and 17 new timer/default-inheritance cases. Coverage includes admission
+capacity, busy-parent JSON avoidance, fairness, stale claims, atomic message
+publication, socket/handler/cancellation failures, preservation of a live
+response, and explicit model overrides.
+
+Nine retained maintenance regressions pass against the owned disposable
+`owui_skill_test` PostgreSQL database. The fixture asserts loopback access and
+that exact database name before resetting its synthetic schema. No shared or
+live application data was used. The database was removed afterward and its
+absence verified; the separate migration-rehearsal database was preserved.
+Native Ruff formatting passes for 374 files, and the exact CI F-rule checks pass.
+
+An independent PostgreSQL 17.7 probe used 40 synthetic timers, two parents and a
+50 MiB uncompressed parent. Concurrent claims were unique, honored capacity and
+included the other parent. A locked-parent dispatch returned in 39.9 ms with
+zero full-parent JSON reads and 128 KiB maximum RSS growth in that probe. Stale
+claim rearm/error/delivery attempts were no-ops. A postcommit socket failure
+stored a visible error and `done=true` in both parent JSON and normalized
+messages without replay. All owned timer, parent and normalized fixtures were
+removed and removal verified. These source-level probes mock model/socket
+services; actual final-image pressure and live dev validation remain required.
+
+The five committed application/test files match the source archive used for
+these regressions, SHA256
+`6a14fb644c37f3d21051bb8a3339396fbd97203a16c99586d99d02ed005ba022`.
+That validation archive was assembled from base `38bb12fef` plus the five
+reviewed files; it is not the final image-build archive.
+
+GitHub checks on source commit `7e5fa4c59` pass:
+[Frontend Format & Build and Unit Tests](https://github.com/jimbo-p/open-webui/actions/runs/42688408020),
+[Python formatting and logic on 3.11/3.12](https://github.com/jimbo-p/open-webui/actions/runs/42688407794),
+and the [Tests result check](https://github.com/jimbo-p/open-webui/actions/runs/42688409283).
+The Tests Suite job was explicitly skipped; the 119 backend and nine maintenance
+regressions above were run separately.
+
+### Remaining image, dev and cleanup gates
+
+No production change is authorized. Final-image startup/health/version and
+regression checks, dev serving/ingestion integration, memory/backlog pressure,
+and deployment/provenance verification remain pending in this record. Preserve
+existing user work and settings during the reviewed migration and handoff.
+Do not report development deployment complete until its exact task definitions,
+images/digests, health and user-visible checks are recorded.
+
+The owned skill-test database, PostgreSQL timer fixtures and the temporary
+frontend formatting/i18n archive have been removed and verified. Local proposal
+and regression evidence, the timer-validation archive/source directory, the
+managed worktree's validation dependencies and the migration-rehearsal container
+remain intentionally retained while final-image and dev gates are active.
+Remove confirmed throwaway artifacts when those gates end, preserving release
+images and required rollback/recovery evidence. Final cleanup must report exact
+remaining resources and verify removal; this record does not claim the
+environment is clean.
