@@ -1,9 +1,10 @@
-# Oxy Open WebUI 0.13.3 preparation audit
+# Oxy Open WebUI 0.13.3 upgrade and dev validation
 
-Audit date: November 9, 2026. The upgrade has not been applied, built, published,
-or deployed. The authorized application change prepared separately is the
-Escape shortcut fix below. Existing application settings were inspected without
-changing them.
+Initial audit date: November 9, 2026. The user subsequently approved integrating
+exact official 0.13.3 with the retained Oxy overlay and Escape fix, building it,
+and deploying/testing it in development. Production deployment is a later
+decision. The sections below record the initial audit; the final section records
+subsequent execution and additional proposed incident work.
 
 ## Exact comparison and scope
 
@@ -276,3 +277,87 @@ No application objects or cloud resources were created. Remote configuration
 probes ran from stdin with read-only transactions and allowlisted output. The
 task-owned temporary validation directory was removed after checks. The local
 worktree and both commits are retained for review and further authorized work.
+
+## Approved dev release execution
+
+The user approved the audited 0.13.3 application transition, build and actual dev
+validation on November 9. Production remains outside this execution scope. The
+build-memory knob and all active Oxy customizations remain; no optional interface
+settings, model metadata or existing timer records were rewritten.
+
+Application integration commit `c42ab69755fa35c89af58ac798a5e90832223870` merges
+exact official 0.13.3 while preserving fork ancestry and the Escape commits. All
+5,300 native paths outside the approved overlay match exact official blobs. The
+reviewed archive SHA256 is
+`6813c85d0dcd673a55bc6b4eb524abf4887ff82a49d19a05fb9650e2d9137dcc`.
+A baseline full-CPU image build was started on `permission-test` directly from
+that verified committed archive, with `BUILD_HASH` set to the full source SHA,
+`BUILD_CHANNEL=main`, and slim/CUDA/Ollama all false. This baseline is not a
+published or deployed release artifact.
+
+Frontend validation on Node 22.23.4 passes all 14 tests, native encryption
+verification, full formatting and i18n extraction/placeholder checks. A disposable
+archive comparison verifies all 5,331 tracked source files unchanged after the
+mutating native checks.
+
+Backend validation uses isolated SQLite/data/static directories and the compatible
+Python 3.12 environment. The first source run exposed three outdated regression
+fixtures: native uploads now check knowledge limits before linking, and native
+compaction accepts form data and returns compacted messages. Commit `8bc2fdb25`
+adapts those fixtures while preserving assertions about original-file handling,
+durable linking and tool-pair retention. All 102 backend cases then pass. No
+application runtime changes were needed for these fixture adaptations.
+
+### Migration rehearsal and continuity evidence
+
+An owned, disposable PostgreSQL 17.7 container was created from a cached image
+with a 768 MiB memory cap. Native historical migrations created the exact old
+schema; synthetic data, not customer data, was used. No live database was changed
+for these tests.
+
+- The native single-transaction upgrade was reproduced holding the tool table's
+  exclusive lock while later channel indexes waited. A tool read timed out. A
+  separately induced 500 ms lock timeout rolled the full upgrade back to the
+  old head, with no partial new schema.
+- Running the six official revisions individually with Alembic connection
+  `lock_timeout=1s` and `statement_timeout=10s` succeeds. With dev-sized tables
+  and continuous synthetic writes, 4,208 tool/message writes completed with
+  zero errors; the maximum observed latency was 42.2 ms. The tool-column ALTER
+  took 9.82 ms; the three channel index statements took 4.15/1.66/4.09 ms.
+  Python/import startup accounts for most of each command's 5.66–8.20 seconds.
+- Old and new ORM create/read/update operations and native getters work against
+  the expanded schema. Existing columns/types/nullability/defaults remain
+  unchanged; five new tables, the tool flag and valid new indexes are present.
+- An old migration-enabled startup cannot resolve the new revision. An old-image
+  rollback must keep migrations disabled and retain expanded schema. A schema
+  downgrade destroys new feature tables/data and is not an automatic rollback.
+- This is evidence for a controlled expansion and traffic handoff, not support
+  for ordinary mixed-version request routing. New temporary-chat identifiers,
+  renewable-session endpoints/revocation, tool activation and knowledge limits
+  have version-specific behavior. All new traffic must move to the new fleet
+  while captured old requests drain. Routing alone does not stop old workers'
+  background scheduler acquisition.
+
+Read-only live size observations found only eight dev channel messages and no
+production channel messages/reactions at that snapshot, so index targets are
+small. Production conditions must be rechecked before any later production
+migration; rehearsal timings are not a zero-downtime guarantee.
+
+### Additional timer incident scope
+
+During the approved upgrade work the user supplied an incident investigation and
+requested a fix preserving subagents where possible. Exact 0.13.3 still contains
+unbounded timer dispatch and full-parent loading before admission. This is a
+separate path from native subagent concurrency caps. A related missing nested
+builtin-tool default can unintentionally enable subagents when the global
+default is false.
+
+Two unapplied proposals were prepared: bounded admission/durable retry in
+`utils/automations.py` and `utils/timers.py`, and per-category global-default
+inheritance in `utils/models.py`. Planned regressions cover real PostgreSQL
+contention, large parents, bounded task growth, fairness, claim ownership,
+cancellation and explicit model overrides. Concrete approval was requested for
+these additional backend changes and dev testing. The dev rollout is held while
+that scope is assessed. Existing production jobs, settings and records remain
+unchanged. Historical running timer states are not proof of live coroutines and
+will not be automatically deleted or replayed.
