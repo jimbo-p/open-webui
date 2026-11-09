@@ -99,7 +99,7 @@ export const DEFAULT_KEYBINDINGS: KeybindingsMap = {
 	[Shortcut.TOGGLE_CONTROLS]: '',
 	[Shortcut.CLOSE_MODAL]: 'Escape',
 	[Shortcut.FOCUS_INPUT]: 'Shift+Escape',
-	[Shortcut.CLEAR_INPUT_SELECTIONS]: 'Escape',
+	[Shortcut.CLEAR_INPUT_SELECTIONS]: '',
 	[Shortcut.GENERATE_MESSAGE_PAIR]: 'Cmd+Shift+Enter',
 	[Shortcut.REGENERATE_RESPONSE]: 'Cmd+R',
 	[Shortcut.ALLOW_TOOL_CALL]: 'Cmd+Alt+Enter',
@@ -120,8 +120,10 @@ export function loadKeybindings(saved: Partial<Record<string, string>> | undefin
 	keybindings.update((current) => {
 		const updated = { ...current };
 		for (const id of CONFIGURABLE_SHORTCUTS) {
-			if (typeof saved[id] === 'string') {
-				updated[id] = saved[id]!;
+			const chord = saved[id];
+			if (typeof chord === 'string') {
+				// Older full shortcut maps can persist the former Escape default.
+				updated[id] = id === Shortcut.CLEAR_INPUT_SELECTIONS && chord === 'Escape' ? '' : chord;
 			}
 		}
 		return updated;
@@ -305,7 +307,7 @@ export const shortcuts: ShortcutRegistry = {
 	},
 	[Shortcut.CLEAR_INPUT_SELECTIONS]: {
 		name: (t) => t('settings.personal.shortcuts.clearInputSelections.label'),
-		keys: ['Escape'],
+		keys: [],
 		category: 'Input',
 		configurable: true,
 		// Tooltips are translated dynamically; keep this key visible to the extractor.
