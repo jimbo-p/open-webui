@@ -54,6 +54,7 @@ log = logging.getLogger(__name__)
 
 SCHEDULER_POLL_INTERVAL = int(os.getenv('SCHEDULER_POLL_INTERVAL', os.getenv('AUTOMATION_POLL_INTERVAL', '10')))
 TIMER_POLL_INTERVAL = int(os.getenv('TIMER_POLL_INTERVAL', '1'))
+TIMER_MAX_CONCURRENT = max(1, int(os.getenv('TIMER_MAX_CONCURRENT', '2')))
 CALENDAR_ALERT_LOOKAHEAD_MINUTES = int(os.getenv('CALENDAR_ALERT_LOOKAHEAD_MINUTES', '10'))
 
 
@@ -64,6 +65,43 @@ CALENDAR_ALERT_LOOKAHEAD_MINUTES = int(os.getenv('CALENDAR_ALERT_LOOKAHEAD_MINUT
 async def automation_worker_loop(app) -> None:
     """Deprecated alias — use scheduler_worker_loop."""
     await scheduler_worker_loop(app)
+
+
+async def _execute_timer_dispatch(app, timer_id: str, claim_id: str) -> None:
+    """Keep capacity until preparation and every returned response future settle."""
+    from open_webui.tasks import tasks
+    from open_webui.utils.timers import execute_due_timer, rearm_due_timer
+
+    cancelled = False
+
+    async def wait_for_work(work):
+        nonlocal cancelled
+        while True:
+            try:
+                return await asyncio.shield(work)
+            except asyncio.CancelledError:
+                cancelled = True
+                if work.done():
+                    return work.result()
+                # A cancelled dispatcher still occupies its slot while work lives.
+
+    try:
+        preparation = asyncio.create_task(execute_due_timer(app, timer_id, claim_id))
+        task_ids = await wait_for_work(preparation)
+        running = [tasks[task_id] for task_id in task_ids or [] if task_id in tasks]
+        if running:
+            await wait_for_work(asyncio.gather(*running, return_exceptions=True))
+    except asyncio.CancelledError:
+        await wait_for_work(asyncio.create_task(rearm_due_timer(timer_id, claim_id)))
+        raise
+    except Exception:
+        log.exception('Scheduler: timer dispatch failed for %s', timer_id)
+        try:
+            await wait_for_work(asyncio.create_task(rearm_due_timer(timer_id, claim_id)))
+        except Exception:
+            log.exception('Scheduler: could not rearm timer %s', timer_id)
+    if cancelled:
+        raise asyncio.CancelledError
 
 
 async def scheduler_worker_loop(app) -> None:
@@ -82,16 +120,23 @@ async def scheduler_worker_loop(app) -> None:
         SCHEDULER_POLL_INTERVAL,
     )
     next_scheduler_poll = 0.0
+    timer_dispatches: set[asyncio.Task] = set()
 
     while True:
         try:
             now = time.monotonic()
             # Timers
             try:
-                from open_webui.utils.timers import claim_due_timers, execute_due_timer
+                from open_webui.utils.timers import claim_due_timers
 
-                for timer_id, claim_id in await claim_due_timers(int(time.time_ns()), limit=10):
-                    asyncio.create_task(execute_due_timer(app, timer_id, claim_id))
+                # Capacity is reserved before claiming: no unbounded semaphore waiters.
+                available = TIMER_MAX_CONCURRENT - len(timer_dispatches)
+                if available > 0:
+                    claims = await claim_due_timers(int(time.time_ns()), limit=min(10, available))
+                    for timer_id, claim_id in claims:
+                        task = asyncio.create_task(_execute_timer_dispatch(app, timer_id, claim_id))
+                        timer_dispatches.add(task)
+                        task.add_done_callback(timer_dispatches.discard)
             except Exception:
                 log.exception('Scheduler: timer error')
 

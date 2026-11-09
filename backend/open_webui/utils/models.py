@@ -403,10 +403,10 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
 
             meta = info.setdefault('meta', {})
             for key, value in default_metadata.items():
-                if key == 'capabilities':
-                    # Merge capabilities: defaults as base, per-model overrides win
-                    existing = meta.get('capabilities') or {}
-                    meta['capabilities'] = {**value, **existing}
+                if key in ('capabilities', 'builtinTools'):
+                    # Merge category defaults; explicit per-model overrides win.
+                    existing = meta.get(key) or {}
+                    meta[key] = {**value, **existing}
                 elif meta.get(key) is None:
                     meta[key] = copy.deepcopy(value)
 
