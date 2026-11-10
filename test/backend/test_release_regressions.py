@@ -50,7 +50,9 @@ async def test_long_tool_run_compacts_from_reported_usage_without_splitting_pair
     )
     summarize = AsyncMock(return_value='The investigation found three matching rows.')
     monkeypatch.setattr(compaction, '_generate_summary', summarize)
-    kept, summary, did_compact = await compaction.compact_messages_for_request(None, None, messages, {}, 'model', {})
+    kept, summary, did_compact = await compaction.compact_messages_for_request(
+        None, None, None, messages, {}, 'model', {}
+    )
     assert did_compact and summary == summarize.return_value
     assert kept[0]['role'] == 'assistant' and kept[0]['tool_calls']
     calls = {call['id'] for message in kept for call in message.get('tool_calls', [])}

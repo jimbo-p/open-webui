@@ -169,6 +169,8 @@ async def test_upload_completion_waits_for_durable_knowledge_link(processing, mo
         add_file_to_knowledge_by_id=AsyncMock(side_effect=link),
     )
     monkeypatch.setattr(file_router, 'Knowledges', knowledge)
+    limits = AsyncMock()
+    monkeypatch.setattr(file_router, 'check_knowledge_upload_limits', limits)
     monkeypatch.setattr(file_router, '_cleanup_local_cache', Mock())
     await file_router.process_uploaded_file(
         p.request,
@@ -180,8 +182,10 @@ async def test_upload_completion_waits_for_durable_knowledge_link(processing, mo
         db=p.db,
     )
 
+    limits.assert_awaited_once_with('kb', 1, file_size=None, exclude_file_ids=['file'], db=p.db)
     knowledge.add_file_to_knowledge_by_id.assert_awaited_once()
-    assert p.operations[-2] == ('link', file.id, 'kb')
+    link_index = p.operations.index(('link', file.id, 'kb'))
+    assert not any(data.get('status') == 'completed' for kind, _, data in p.operations[:link_index] if kind == 'data')
     assert file.data['status'] == ('failed' if link_fails else 'completed')
     if link_fails:
         assert 'Knowledge link failed' in file.data['error']
