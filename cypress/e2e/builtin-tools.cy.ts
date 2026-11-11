@@ -9,11 +9,7 @@ const modelId = 'builtin-tools-editor-regression';
 const baseModelId = 'builtin-tools-regression-base';
 const modelUrl = `/workspace/models/edit?id=${modelId}`;
 const switchFor = (label: string) => cy.get(`[role="switch"][aria-label="${label}"]`);
-const openBuiltinTools = () =>
-	cy
-		.contains('summary > span:first-child', /^Builtin Tools$/)
-		.parent()
-		.click();
+const openBuiltinTools = () => cy.contains('summary', /^Builtin Tools\b/).click();
 
 describe('built-in tool category inheritance in the model editor', () => {
 	let defaults: ToolMap;
@@ -124,7 +120,7 @@ describe('built-in tool category inheritance in the model editor', () => {
 		switchFor('Notes').should('have.attr', 'aria-checked', 'false');
 		switchFor('Chat History').should('have.attr', 'aria-checked', 'false');
 		switchFor('Sub-agents').should('have.attr', 'aria-checked', 'false');
-		cy.get('summary > span:first-child').filter(':contains("Sub-agents")').should('not.exist');
+		cy.contains('summary', /^Sub-agents\b/).should('not.exist');
 	});
 
 	it('saves explicit true when enabling a category and retains it after OFF then ON', () => {
@@ -145,7 +141,7 @@ describe('built-in tool category inheritance in the model editor', () => {
 		openEditor();
 		switchFor('Notes').should('have.attr', 'aria-checked', 'false');
 		switchFor('Chat History').should('have.attr', 'aria-checked', 'true');
-		cy.contains('summary > span:first-child', /^Sub-agents$/).should('exist');
+		cy.contains('summary', /^Sub-agents\b/).should('exist');
 		switchFor('Chat History').click();
 		saveAndReopen({ notes: false, chats: false, subagents: true });
 		switchFor('Chat History').should('have.attr', 'aria-checked', 'false');
