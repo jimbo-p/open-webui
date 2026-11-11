@@ -1,5 +1,31 @@
 # Oxy Open WebUI 0.13.3 upgrade and dev validation
 
+## Built-in tool editor inheritance correction
+
+On November 11, 2026, the user approved the narrow frontend correction, dev
+validation and production delivery. The base is maintained `origin/main`
+`a590d2588ac5c2b7812ca4c2b3a77095108064c4`, retaining exact official 0.13.3
+and the existing Oxy overlay.
+
+The backend intentionally inherits `meta.builtinTools` defaults per category.
+The editor previously selected an entire model map instead and deleted a
+category when enabled. With administrator `notes=false` and model `time=true`,
+it displayed Notes enabled while the backend disabled it; toggling off/on could
+not create the required true override. This is a fork integration mismatch.
+
+`ModelEditor.svelte`, `Capabilities.svelte` and `BuiltinTools.svelte` now pass
+administrator defaults separately from sparse model overrides. Toggles and the
+subagent selector display effective merged settings, while saves retain only
+model overrides. Enabling or disabling a category writes explicit true or false.
+Untouched categories continue to inherit later administrator default changes.
+The shared administrator-default controls retain their existing meaning.
+
+No backend, dependency, schema, Dockerfile or global configuration change is
+required. All existing customizations and explicit production Notes overrides
+are retained; none are retired. The previous same-version image remains usable
+for rollback, although its editor still has this mismatch. Deployment evidence
+will record the reviewed source, immutable artifact, dev checks and final pins.
+
 Initial audit date: November 9, 2026. The user approved exact official 0.13.3
 with the retained Oxy overlay and Escape fix, followed by the concrete timer
 backpressure and builtin-tool default-inheritance fixes and development

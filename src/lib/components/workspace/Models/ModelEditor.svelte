@@ -249,6 +249,7 @@
 	let capabilities = { ...DEFAULT_CAPABILITIES };
 	let defaultFeatureIds = [];
 	let builtinTools: Record<string, boolean> = {};
+	$: effectiveBuiltinTools = { ...(defaultMeta.builtinTools ?? {}), ...builtinTools };
 
 	let actionIds = [];
 	let accessGrants: any[] = [];
@@ -483,10 +484,7 @@
 			}
 		}
 
-		if (
-			Object.keys(builtinTools).length > 0 ||
-			Object.keys(defaultMeta.builtinTools ?? {}).length > 0
-		) {
+		if (Object.keys(builtinTools).length > 0) {
 			modelInfo.meta.builtinTools = builtinTools;
 		} else {
 			if (modelInfo.meta.builtinTools) {
@@ -736,7 +734,7 @@
 				...(model?.meta?.capabilities ?? {})
 			};
 			defaultFeatureIds = model?.meta?.defaultFeatureIds ?? defaultMeta.defaultFeatureIds ?? [];
-			builtinTools = model?.meta?.builtinTools ?? defaultMeta.builtinTools ?? {};
+			builtinTools = { ...(model?.meta?.builtinTools ?? {}) };
 			terminalId = model?.meta?.terminalId ?? '';
 			tts = { voice: model?.meta?.tts?.voice ?? '' };
 			voice = { voice: model?.meta?.voice?.voice ?? '' };
@@ -788,7 +786,7 @@
 		// Use admin defaults as base, falling back to hardcoded defaults
 		capabilities = { ...DEFAULT_CAPABILITIES, ...(defaultMeta.capabilities ?? {}) };
 		defaultFeatureIds = defaultMeta.defaultFeatureIds ?? [];
-		builtinTools = defaultMeta.builtinTools ?? {};
+		builtinTools = {};
 		toolIds = defaultMeta.toolIds ?? [];
 
 		// Scroll to top 'workspace-container' element
@@ -1721,9 +1719,10 @@
 											functionCalling={params.function_calling ?? defaultFunctionCalling}
 											bind:defaultFeatureIds
 											bind:builtinTools
+											builtinToolDefaults={defaultMeta.builtinTools ?? {}}
 											disabled={readOnly}
 										/>
-										{#if $config?.features?.enable_subagents && capabilities.builtin_tools && builtinTools.subagents !== false && $visibleControls['model_editor.tools.subagents']}
+										{#if $config?.features?.enable_subagents && capabilities.builtin_tools && effectiveBuiltinTools.subagents !== false && $visibleControls['model_editor.tools.subagents']}
 											<ModelSettingsSection
 												label={$i18n.t('settings.admin.models.builtinTools.subagents.label')}
 												description={$i18n.t(

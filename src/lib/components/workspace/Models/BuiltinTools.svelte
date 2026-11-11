@@ -105,17 +105,14 @@
 	);
 
 	export let builtinTools: Record<string, boolean> = {};
+	export let builtinToolDefaults: Record<string, boolean> = {};
 	export let capabilities: Record<string, boolean> = {};
 	export let disabled = false;
-	$: enabledTools = allTools.filter((key) => builtinTools[key] !== false);
+	$: effectiveBuiltinTools = { ...builtinToolDefaults, ...builtinTools };
+	$: enabledTools = allTools.filter((key) => effectiveBuiltinTools[key] !== false);
 
 	const setBuiltinTool = (tool: keyof typeof toolLabels, checked: boolean) => {
-		builtinTools = { ...builtinTools };
-		if (checked) {
-			delete builtinTools[tool];
-		} else {
-			builtinTools[tool] = false;
-		}
+		builtinTools = { ...builtinTools, [tool]: checked };
 	};
 </script>
 
@@ -153,7 +150,7 @@
 				<ModelSettingToggle
 					label={toolLabels[key].label}
 					description={toolLabels[key].description}
-					checked={builtinTools[key] !== false}
+					checked={effectiveBuiltinTools[key] !== false}
 					{disabled}
 					on:change={(e) => setBuiltinTool(key, e.detail)}
 				/>

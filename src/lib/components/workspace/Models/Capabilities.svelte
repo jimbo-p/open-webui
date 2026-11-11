@@ -76,6 +76,7 @@
 
 	export let defaultFeatureIds: string[] = [];
 	export let builtinTools: Record<string, boolean> = {};
+	export let builtinToolDefaults: Record<string, boolean> = {};
 	export let disabled = false;
 	const featureKeys = ['web_search', 'image_generation', 'code_interpreter'] as const;
 	$: hasTerminal =
@@ -171,6 +172,6 @@
 	{/if}
 
 	{#if capabilities.builtin_tools}
-		<BuiltinTools bind:builtinTools {capabilities} {disabled} />
+		<BuiltinTools bind:builtinTools {builtinToolDefaults} {capabilities} {disabled} />
 	{/if}
 </div>
