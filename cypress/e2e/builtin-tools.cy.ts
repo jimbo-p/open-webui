@@ -6,6 +6,7 @@
 type ToolMap = Record<string, boolean>;
 
 const modelId = 'builtin-tools-editor-regression';
+const baseModelId = 'builtin-tools-regression-base';
 const modelUrl = `/workspace/models/edit?id=${modelId}`;
 const switchFor = (label: string) => cy.get(`[role="switch"][aria-label="${label}"]`);
 const openBuiltinTools = () =>
@@ -19,7 +20,7 @@ describe('built-in tool category inheritance in the model editor', () => {
 	let savedModel: {
 		id: string;
 		name: string;
-		base_model_id: null;
+		base_model_id: string;
 		write_access: boolean;
 		is_active: boolean;
 		params: Record<string, unknown>;
@@ -49,7 +50,7 @@ describe('built-in tool category inheritance in the model editor', () => {
 		savedModel = {
 			id: modelId,
 			name: 'Builtin tools regression',
-			base_model_id: null,
+			base_model_id: baseModelId,
 			write_access: true,
 			is_active: true,
 			params: { function_calling: 'native' },
@@ -68,6 +69,9 @@ describe('built-in tool category inheritance in the model editor', () => {
 			});
 		});
 		cy.intercept('GET', '**/api/v1/users/user/settings*', { ui: { showChangelog: false } });
+		cy.intercept('GET', '**/api/models*', {
+			data: [{ id: baseModelId, name: 'Regression base model', owned_by: 'openai' }]
+		});
 		cy.intercept('GET', '**/api/v1/configs/models/defaults', (request) => {
 			request.reply({
 				DEFAULT_MODEL_METADATA: {
