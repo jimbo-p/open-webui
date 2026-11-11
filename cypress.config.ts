@@ -5,6 +5,7 @@ export default defineConfig({
 	screenshotOnRunFailure: false,
 	viewportWidth: 1440,
 	viewportHeight: 1100,
+	defaultCommandTimeout: 20000,
 	e2e: {
 		baseUrl: 'http://localhost:5173',
 		supportFile: false,

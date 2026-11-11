@@ -29,6 +29,9 @@ describe('built-in tool category inheritance in the model editor', () => {
 
 	const openEditor = () => {
 		cy.visit(modelUrl);
+		cy.location('pathname').should('equal', '/workspace/models/edit');
+		cy.wait('@fixtureModel').its('response.statusCode').should('equal', 200);
+		cy.wait('@modelDefaults').its('response.statusCode').should('equal', 200);
 		cy.get('input[aria-label="Model Name"]').should(($input) => {
 			expect($input.val()).to.equal(savedModel.name);
 		});
@@ -69,6 +72,10 @@ describe('built-in tool category inheritance in the model editor', () => {
 			});
 		});
 		cy.intercept('GET', '**/api/v1/users/user/settings*', { ui: { showChangelog: false } });
+		cy.intercept('GET', '**/api/v1/tools/?*', []);
+		cy.intercept('GET', '**/api/v1/functions/', []);
+		cy.intercept('GET', '**/api/v1/models/tags', []);
+		cy.intercept('GET', '**/api/v1/audio/voices', { voices: [] });
 		cy.intercept('GET', '**/api/models*', {
 			data: [{ id: baseModelId, name: 'Regression base model', owned_by: 'openai' }]
 		});
@@ -80,11 +87,12 @@ describe('built-in tool category inheritance in the model editor', () => {
 				},
 				DEFAULT_FUNCTION_CALLING: 'native'
 			});
-		});
+		}).as('modelDefaults');
 		cy.intercept('GET', '**/api/v1/models/model?*', (request) => {
 			expect(new URL(request.url).searchParams.get('id')).to.equal(modelId);
 			request.reply(savedModel);
-		});
+		}).as('fixtureModel');
+		cy.intercept('GET', '**/api/v1/auths/', (request) => request.continue()).as('sessionUser');
 		cy.intercept('POST', '**/api/v1/models/model/update', (request) => {
 			expect(request.body.id).to.equal(modelId);
 			savedModel = { ...savedModel, ...request.body, write_access: true };
@@ -99,6 +107,16 @@ describe('built-in tool category inheritance in the model editor', () => {
 				}
 			});
 		});
+		// Vite's lazy route compilation can continue after the document's load event.
+		cy.wait('@sessionUser', { requestTimeout: 120000 })
+			.its('response.statusCode')
+			.should('equal', 200);
+	});
+
+	afterEach(() => {
+		cy.clearAllLocalStorage({ log: false });
+		cy.clearAllSessionStorage({ log: false });
+		cy.clearAllCookies({ log: false });
 	});
 
 	it('shows inherited disabled categories beside unrelated model overrides', () => {
