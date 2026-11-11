@@ -20,11 +20,85 @@ model overrides. Enabling or disabling a category writes explicit true or false.
 Untouched categories continue to inherit later administrator default changes.
 The shared administrator-default controls retain their existing meaning.
 
-No backend, dependency, schema, Dockerfile or global configuration change is
-required. All existing customizations and explicit production Notes overrides
+No backend source, dependency declaration, schema, Dockerfile or global configuration
+change is required. All existing customizations and explicit production Notes overrides
 are retained; none are retired. The previous same-version image remains usable
 for rollback, although its editor still has this mismatch. Deployment evidence
-will record the reviewed source, immutable artifact, dev checks and final pins.
+is tracked in the [infrastructure release record](https://dev.azure.com/oxy-well-surveillance/OpsAI/_git/oxygpt?path=%2Freports%2Fbuiltin-tools-inheritance-20261111.md&version=GBmaster).
+
+### Reviewed artifact and dev evidence
+
+- Application source: `036dfe64d8c444ee987ba43e913f1854155a8762`.
+- Committed archive SHA256:
+  `209eb1816d332521f91eee64a15008e028697da8518dc9e60daa6da2078afeb1`;
+  all 5,336 archive files verified before the build.
+- Build: unchanged maintained Dockerfile, full CPU image,
+  `USE_SLIM=false`, `USE_CUDA=false`, `USE_OLLAMA=false`,
+  `BUILD_HASH=036dfe64d8c444ee987ba43e913f1854155a8762`, and
+  `BUILD_CHANNEL=main`. The image revision label records that same source.
+- Tag: `open-webui:v0.13.3-oxy2-036dfe64d`.
+- Immutable image:
+  `217589814678.dkr.ecr.us-east-1.amazonaws.com/open-webui@sha256:625925e64ab0720f65a43a3279ca22a89054beea04641f268e5ff269eafbefff`.
+- Tested configuration digest:
+  `sha256:9cdb8b882ecee0ef13441fbfef0110a8ab2184752ac0f8f4fa4879b5df3c54f1`.
+  Registry readback and an immutable pull verify the source label,
+  configuration and all 21 root filesystem layers match the tested artifact.
+
+Validation passes 14 frontend unit tests, native encryption verification,
+formatting and translation checks, and 119 backend plus nine maintenance
+regressions inside the actual candidate image with disposable databases. Native
+startup becomes ready in 31.4 seconds; `/health`, `/ready` and `/api/version`
+return typed JSON for version 0.13.3. All 321 backend Python files and 117 pinned
+requirements match the reviewed source; eight corporate certificates and the
+encryption WASM artifact are verified. Mounted test dependencies preserve the
+candidate's native runtime packages.
+
+The focused browser regression fails on the preceding dev image at the exact
+inherited Notes assertion. All seven browser cases pass on the corrected built
+frontend and again on actual dev serving definition 460 and ingestion definition
+41 using the immutable digest above. Dev checks completed on November 11 at
+**1:02 PM CST**: real editor save/reopen and OFF-to-ON persist explicit true;
+native chat completes `search_notes` and `view_note` against a private synthetic
+note; rapid double Enter submits one completion with no browser page errors;
+credential-owner MCP identity, ingestion/retrieval and original CSV bytes pass.
+
+All 474 existing configuration values and 55 existing models retain their
+baseline hashes. Both temporary accounts and their sessions, model/history,
+note, chat, knowledge, file/chunk/grant and related records are absent across
+17 scoped categories; both uploaded S3 objects are verified absent. Inherited
+false UI cases replace only the browser's defaults response because actual dev
+defaults omit those categories. Real saves and Notes calls use unmocked APIs.
+An initial direct readiness timeout occurred before fixtures; repeated native
+serving and ingestion checks passed without configuration changes.
+
+GitHub did not launch PR checks after push/open/reopen despite active workflow
+configuration. Required formatting, translation, production build and frontend
+tests passed locally or in the actual image build; no branch-protection bypass
+was used. Infrastructure PR policies and final worker retirement, production
+pins, verification and cleanup are recorded in the linked release report.
+
+### Resolved transitive dependencies
+
+The unchanged native recipe resolves unpinned transitive dependencies during
+the build. The approved preceding image and candidate each contain 316 Python
+distributions, with no additions or removals. All 117 pinned requirements match;
+the following nine transitive versions differ and are included in the tested
+artifact:
+
+| Distribution   | Preceding image | Candidate |
+| -------------- | --------------- | --------- |
+| annotated-doc  | 0.0.5           | 0.0.6     |
+| ctranslate2    | 4.8.5           | 4.9.0     |
+| google-auth    | 2.62.1          | 2.62.2    |
+| jsonpatch      | 1.45            | 1.47      |
+| jsonpointer    | 3.10            | 3.12      |
+| markdown-it-py | 4.2.0           | 4.3.0     |
+| pybase64       | 1.5.1           | 1.5.2     |
+| soupsieve      | 4.0.1           | 4.1       |
+| typer          | 0.29.0          | 0.29.1    |
+
+Refresh editor tabs opened before rollout to load the corrected frontend. The
+application version remains 0.13.3, so automatic tab reload is not assumed.
 
 Initial audit date: November 9, 2026. The user approved exact official 0.13.3
 with the retained Oxy overlay and Escape fix, followed by the concrete timer
