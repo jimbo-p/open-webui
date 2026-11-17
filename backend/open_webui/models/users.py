@@ -8,6 +8,7 @@ from typing import Literal, Optional
 from open_webui.env import DATABASE_USER_ACTIVE_STATUS_UPDATE_INTERVAL
 from open_webui.internal.db import Base, JSONField, get_async_db_context
 from open_webui.utils.misc import throttle
+from open_webui.utils.memory_prompt import settings_patch as memory_settings_patch
 from open_webui.utils.validate import validate_image_url
 from pydantic import (
     BaseModel,
@@ -822,11 +823,15 @@ class UsersTable:
         self, id: str, updated: dict, db: AsyncSession | None = None
     ) -> UserModel | None:
         async with get_async_db_context(db) as session:
-            user = await session.get(User, id)
+            # Serialize with the dreaming publisher. Refetch even when this
+            # request's session already loaded an older copy of the user row.
+            user = await session.scalar(
+                select(User).where(User.id == id).with_for_update().execution_options(populate_existing=True)
+            )
             if not user:
                 return None
             user_settings = dict(user.settings or {})
-            updated = dict(updated)
+            updated = memory_settings_patch(user_settings, updated)
             ui_settings = updated.pop('ui', None)
             user_settings.update(updated)
             if ui_settings is not None:
