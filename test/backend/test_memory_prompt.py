@@ -47,6 +47,54 @@ def test_malformed_owned_ranges_reject_without_guessing(text):
         replace_block(text, NEW)
 
 
+@pytest.mark.parametrize('before,after', [('</oxy_mem', 'ory>'), ('<oxy_mem', 'ory>'), ('</OXY_mem', 'ORY>')])
+def test_clearing_cannot_join_personal_fragments_into_a_marker(before, after):
+    with pytest.raises(MemoryPromptError):
+        replace_block(before + OLD + after, '')
+
+
+@pytest.mark.parametrize(
+    'incoming',
+    [
+        OLD + '</oxy_mem' + OLD + 'ory>',
+        OLD + '<oxy_mem' + OLD + 'ory>personal</oxy_mem' + OLD + 'ory>',
+    ],
+)
+def test_removing_duplicate_sections_cannot_synthesize_orphan_or_extra_envelopes(incoming):
+    with pytest.raises(MemoryPromptError):
+        replace_block(incoming, NEW)
+
+
+@pytest.mark.parametrize('block', ['plain text', NEW + OLD, 'personal prefix' + NEW])
+def test_replacement_requires_exactly_the_intended_owned_envelope(block):
+    with pytest.raises(MemoryPromptError):
+        replace_block('Personal ' + OLD, block)
+
+
+@pytest.mark.parametrize('block,incoming', [('', '</oxy_mem' + OLD + 'ory>'), (NEW, OLD + '</oxy_mem' + OLD + 'ory>')])
+def test_editor_composition_rejection_keeps_both_input_objects_unchanged(block, incoming):
+    current, patch = owned(block), {'ui': {'system': incoming, 'theme': 'dark'}}
+    original = copy.deepcopy((current, patch))
+    with pytest.raises(MemoryPromptError):
+        settings_patch(current, patch)
+    assert (current, patch) == original
+
+
+@pytest.mark.parametrize('block,prefix', [('', []), (NEW, [{'type': 'text', 'text': OLD}])])
+def test_multipart_removal_cannot_join_personal_fragments_into_a_marker(block, prefix):
+    parts = [
+        *prefix,
+        {'type': 'text', 'text': '</oxy_mem'},
+        {'type': 'text', 'text': OLD},
+        {'type': 'text', 'text': 'ory>'},
+    ]
+    messages = [{'role': 'system', 'content': parts}]
+    original = copy.deepcopy(messages)
+    with pytest.raises(MemoryPromptError):
+        request_messages(messages, owned(block))
+    assert messages == original
+
+
 def test_unmanaged_marker_text_remains_user_text():
     messages = [{'role': 'system', 'content': '<oxy_memory>unfinished'}]
     assert request_messages(messages, {'ui': {'system': NEW}}) is messages
@@ -180,7 +228,15 @@ async def test_native_agent_receives_refreshed_system_instructions(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_malformed_owned_request_rejects_before_model_lookup_or_chat_creation():
+@pytest.mark.parametrize(
+    'block,content',
+    [
+        (NEW, '<oxy_memory>unfinished'),
+        ('', '</oxy_mem' + OLD + 'ory>'),
+        (NEW, OLD + '</oxy_mem' + OLD + 'ory>'),
+    ],
+)
+async def test_malformed_owned_request_rejects_before_model_lookup_or_chat_creation(block, content):
     from types import SimpleNamespace
 
     from fastapi import HTTPException
@@ -189,7 +245,7 @@ async def test_malformed_owned_request_rejects_before_model_lookup_or_chat_creat
     # An app without state cannot look up models, create chats or launch a title
     # request. Validation must reject the malformed marker before touching it.
     request = SimpleNamespace(app=object())
-    form = {'model': 'unused', 'messages': [{'role': 'system', 'content': '<oxy_memory>unfinished'}]}
+    form = {'model': 'unused', 'messages': [{'role': 'system', 'content': content}]}
     with pytest.raises(HTTPException) as error:
-        await chat_completion(request, form, SimpleNamespace(settings=owned()))
+        await chat_completion(request, form, SimpleNamespace(settings=owned(block)))
     assert error.value.status_code == 409

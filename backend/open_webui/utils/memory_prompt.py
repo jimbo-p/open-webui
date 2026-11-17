@@ -63,14 +63,22 @@ def canonical_block(settings) -> str | None:
     return text[ranges[0][0] : ranges[0][1]] if ranges else ''
 
 
+def _composed(text: str, block: str) -> str:
+    """Removal may join personal fragments into a new marker; validate the result."""
+    ranges = _ranges(text)
+    if len(ranges) != int(bool(block)) or (block and text[ranges[0][0] : ranges[0][1]] != block):
+        raise MemoryPromptError('Composing the prompt would create an unexpected memory section.')
+    return text
+
+
 def replace_block(text: str, block: str) -> str:
     """Replace complete owned ranges; preserve every character outside them."""
     ranges = _ranges(text)
     if not ranges:
         if not block:
-            return text
+            return _composed(text, block)
         separator = '' if not text or text.endswith('\n\n') else ('\n' if text.endswith('\n') else '\n\n')
-        return text + separator + block
+        return _composed(text + separator + block, block)
     pieces, previous = [], 0
     for position, (start, end) in enumerate(ranges):
         pieces.append(text[previous:start])
@@ -78,7 +86,7 @@ def replace_block(text: str, block: str) -> str:
             pieces.append(block)
         previous = end
     pieces.append(text[previous:])
-    return ''.join(pieces)
+    return _composed(''.join(pieces), block)
 
 
 def settings_patch(current, updated: dict) -> dict:
@@ -120,6 +128,9 @@ def _request_content(content, block: str):
             changed.append(part)
     if block and not has_section:
         changed.append({'type': 'text', 'text': block})
+    # Text parts can become adjacent after removing an owned section. Check
+    # their composed text too, while keeping every original part and byte.
+    _composed(''.join(part['text'] for part in changed if isinstance(part, dict) and part.get('type') == 'text'), block)
     return changed
 
 

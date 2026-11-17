@@ -5,6 +5,7 @@ database named memory_prompt_test_*. These tests create only their own user tabl
 """
 
 import asyncio
+import copy
 import os
 import time
 
@@ -172,3 +173,28 @@ async def test_malformed_user_edit_rolls_back_and_field_specific_save_preserves_
     assert saved['ui'] == {'system': 'Original personal\n\n' + OLD, 'theme': 'light'}
     assert saved['tools'] == {'valves': {'demo': {'safe': True}}}
     assert saved['oxy_memory'] == {'managed': True, 'version': 1}
+
+
+@pytest.mark.parametrize(
+    'clear,incoming',
+    [
+        (True, '</oxy_mem' + OLD + 'ory>'),
+        (False, OLD + '</oxy_mem' + OLD + 'ory>'),
+        (False, OLD + '<oxy_mem' + OLD + 'ory>personal</oxy_mem' + OLD + 'ory>'),
+    ],
+)
+async def test_synthesized_marker_rejection_rolls_back_every_settings_field(database, clear, incoming):
+    _, sessions = database
+    async with sessions() as session:
+        row = await session.get(User, 'pilot')
+        if clear:
+            row.settings = {**row.settings, 'ui': {**row.settings['ui'], 'system': 'Original personal'}}
+            await session.commit()
+        original = copy.deepcopy(row.settings)
+        with pytest.raises(MemoryPromptError):
+            await Users.update_user_settings_by_id(
+                'pilot', {'ui': {'system': incoming, 'theme': 'must not save'}}, db=session
+            )
+        await session.rollback()
+    async with sessions() as session:
+        assert (await session.get(User, 'pilot')).settings == original
