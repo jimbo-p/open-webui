@@ -107,6 +107,7 @@ from open_webui.tools.builtin import (
     update_skill_files,
     write_note,
 )
+from open_webui.utils import microapp_authoring
 from open_webui.utils.access_control import has_access, has_connection_access, has_permission
 from open_webui.utils.chat_id import is_saved_chat_id, is_temporary_chat_id
 from open_webui.utils.headers import (
@@ -538,6 +539,18 @@ async def get_tools(request: Request, tool_ids: list[str], user: UserModel, extr
 
                         async def make_tool_function(function_name, tool_server_data, connection, server_id, metadata):
                             async def tool_function(**kwargs):
+                                if server_id == microapp_authoring.SERVER_ID:
+                                    return await _execute_microapp_authoring_tool(
+                                        request,
+                                        user,
+                                        metadata,
+                                        extra_params.get('__event_emitter__'),
+                                        tool_server_data,
+                                        connection,
+                                        function_name,
+                                        kwargs,
+                                    )
+
                                 headers, cookies = await build_tool_server_headers(
                                     connection, request, user, server_id=server_id, metadata=metadata
                                 )
@@ -1823,6 +1836,49 @@ async def get_tool_servers_data(servers: list[dict[str, Any]]) -> list[dict[str,
     return results
 
 
+async def _execute_microapp_authoring_tool(
+    request, user, metadata, event_emitter, server_data, connection, operation, params
+):
+    route = microapp_authoring.resolve_route(server_data, connection, operation)
+    submitting = operation == microapp_authoring.SUBMIT
+    status_route = (
+        microapp_authoring.resolve_route(server_data, connection, microapp_authoring.STATUS) if submitting else route
+    )
+    if route is None or status_route is None:
+        return {'error': 'The micro-app authoring connection is invalid.'}, None
+
+    token = getattr(getattr(request.state, 'token', None), 'credentials', None)
+    session_header = bearer_auth_header(token).get('Authorization')
+    if not session_header:
+        return {'error': 'Sign in to continue micro-app work.'}, None
+    headers, _ = await build_tool_server_headers(
+        connection, request, user, server_id=microapp_authoring.SERVER_ID, metadata=metadata
+    )
+    if headers.get('Authorization') != session_header:
+        return {'error': 'The micro-app authoring connection must use your session.'}, None
+    headers.setdefault('Content-Type', 'application/json')
+
+    async def call_authoring(name, payload):
+        request_headers = headers
+        if name == microapp_authoring.SUBMIT:
+            header = microapp_authoring.REQUEST_ID_HEADER
+            request_headers = {key: value for key, value in headers.items() if key.lower() != header.lower()}
+            request_headers[header] = microapp_authoring.request_id(user.id, metadata, payload)
+        return await execute_tool_server(
+            url=server_data['url'],
+            headers=request_headers,
+            cookies={},
+            name=name,
+            params=payload,
+            server_data=status_route if name == microapp_authoring.STATUS else route,
+            allow_redirects=False,
+        )
+
+    if submitting:
+        return await microapp_authoring.track_job(call_authoring, params, event_emitter)
+    return await call_authoring(operation, params)
+
+
 async def execute_tool_server(
     url: str,
     headers: dict[str, str],
@@ -1830,9 +1886,14 @@ async def execute_tool_server(
     name: str,
     params: dict[str, Any],
     server_data: dict[str, Any],
+    *,
+    allow_redirects: bool | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any | None]]:
     if not ENABLE_TOOL_SERVERS:
         raise RuntimeError('Tool servers are disabled')
+
+    if allow_redirects is None:
+        allow_redirects = AIOHTTP_CLIENT_ALLOW_REDIRECTS
 
     error = None
     try:
@@ -1943,7 +2004,7 @@ async def execute_tool_server(
                     headers=headers,
                     cookies=cookies,
                     ssl=AIOHTTP_CLIENT_SESSION_TOOL_SERVER_SSL,
-                    allow_redirects=AIOHTTP_CLIENT_ALLOW_REDIRECTS,
+                    allow_redirects=allow_redirects,
                 ) as response:
                     if response.status >= 400:
                         text = await response.text()
@@ -1968,7 +2029,7 @@ async def execute_tool_server(
                     headers=headers,
                     cookies=cookies,
                     ssl=AIOHTTP_CLIENT_SESSION_TOOL_SERVER_SSL,
-                    allow_redirects=AIOHTTP_CLIENT_ALLOW_REDIRECTS,
+                    allow_redirects=allow_redirects,
                 ) as response:
                     if response.status >= 400:
                         text = await response.text()
