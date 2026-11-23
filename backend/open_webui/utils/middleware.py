@@ -44,6 +44,7 @@ from open_webui.env import (
     ENABLE_TOOL_SERVERS,
     GLOBAL_LOG_LEVEL,
     RAG_SYSTEM_CONTEXT,
+    TOOL_RESULT_MAX_CHARS,
 )
 from open_webui.events import EVENTS, publish_event
 from open_webui.models.access_grants import AccessGrants
@@ -925,6 +926,17 @@ async def process_tool_result(
             tool_result = json.dumps(tool_result[0], indent=2, ensure_ascii=False) if len(tool_result) > 0 else ''
         else:
             tool_result = str(tool_result)
+
+    if isinstance(tool_result, str) and len(tool_result) > TOOL_RESULT_MAX_CHARS:
+        total_chars = len(tool_result)
+        log.warning(
+            'Tool %s returned %d characters; keeping %d', tool_function_name, total_chars, TOOL_RESULT_MAX_CHARS
+        )
+        tool_result = (
+            f'{tool_result[:TOOL_RESULT_MAX_CHARS]}\n\n[Tool result truncated: only the first '
+            f'{TOOL_RESULT_MAX_CHARS:,} of {total_chars:,} characters are kept. '
+            'Request a smaller range or a narrower query to read the rest.]'
+        )
 
     return tool_result, tool_result_files, tool_result_embeds
 

@@ -1176,6 +1176,9 @@ KNOWLEDGE_GREP_MAX_MATCHES = _int_env('KNOWLEDGE_GREP_MAX_MATCHES', 50)
 # Characters returned by view_file / view_knowledge_file.
 VIEW_FILE_MAX_CHARS = _int_env('VIEW_FILE_MAX_CHARS', 100_000)
 VIEW_FILE_DEFAULT_MAX_CHARS = _int_env('VIEW_FILE_DEFAULT_MAX_CHARS', 10_000)
+# Characters of a single tool result kept for the model and the saved chat. A larger result cannot fit any
+# configured model's context window, so it only made the turn fail and stayed in the chat on every later turn.
+TOOL_RESULT_MAX_CHARS = _int_env('TOOL_RESULT_MAX_CHARS', 4_000_000)
 
 # Tools/functions pip options
 
