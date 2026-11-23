@@ -254,6 +254,7 @@ from open_webui.utils.headers import get_headers_and_cookies
 from open_webui.utils.json_codec import JSONCodec
 from open_webui.utils.json_response import apply_orjson_http_json
 from open_webui.utils.logger import start_logger
+from open_webui.utils.memory_prompt import MemoryPromptError, request_messages as memory_request_messages
 from open_webui.utils.middleware import (
     background_tasks_handler,
     build_chat_response_context,
@@ -1108,6 +1109,16 @@ async def chat_completion(
     form_data: dict,
     user=Depends(get_verified_user),
 ):
+    # Authentication fetched this user's current settings. Reconcile before
+    # creating chat records or starting any background model work.
+    try:
+        form_data['messages'] = memory_request_messages(form_data.get('messages') or [], user.settings)
+    except MemoryPromptError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='Memory prompt markers are incomplete. The chat was not started.',
+        ) from exc
+
     if not request.app.state.MODELS:
         await get_all_models(request, user=user)
 

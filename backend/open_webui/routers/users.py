@@ -40,6 +40,7 @@ from open_webui.models.knowledge import Knowledges
 from open_webui.models.models import Models
 from open_webui.models.tools import Tools
 from open_webui.utils.access_control import fill_missing_permissions, get_permissions, has_permission
+from open_webui.utils.memory_prompt import MemoryPromptError
 from open_webui.utils.auth import (
     create_api_key,
     get_admin_user,
@@ -538,7 +539,13 @@ async def update_user_settings_by_session_user(
         if isinstance(ui_notifications, dict):
             ui_notifications.pop('webhook_url', None)
 
-    user = await Users.update_user_settings_by_id(user.id, updated_user_settings, db=db)
+    try:
+        user = await Users.update_user_settings_by_id(user.id, updated_user_settings, db=db)
+    except MemoryPromptError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='Memory prompt markers are incomplete. Your settings were not changed.',
+        ) from exc
     if user:
         await publish_event(
             request,

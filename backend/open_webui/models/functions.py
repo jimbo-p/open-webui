@@ -412,7 +412,7 @@ class FunctionsTable:
             user_settings['functions']['valves'][id] = encrypt_valves(valves)
 
             # Update the user settings in the database
-            await Users.update_user_by_id(user_id, {'settings': user_settings}, db=db)
+            await Users.update_user_settings_by_id(user_id, {'functions': user_settings['functions']}, db=db)
 
             return valves
         except Exception as e:
