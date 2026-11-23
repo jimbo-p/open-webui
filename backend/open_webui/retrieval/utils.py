@@ -12,6 +12,7 @@ from urllib.parse import quote
 import aiohttp
 import numpy as np
 import requests
+import tiktoken
 from fastapi import HTTPException
 from langchain_classic.retrievers import (
     ContextualCompressionRetriever,
@@ -1379,6 +1380,85 @@ def filter_source_metadata(metadata: dict) -> dict:
     return result
 
 
+# text-embedding-3 models reject an input over 8,192 cl100k tokens; the margin covers boundary effects and query
+# prefixes. The image caches cl100k_base whatever encoding chunking is set to use.
+QUERY_EMBEDDING_MAX_TOKENS = 8000
+QUERY_EMBEDDING_ENCODING = 'cl100k_base'
+
+
+def query_fits_embedding(query, max_tokens: int = QUERY_EMBEDDING_MAX_TOKENS) -> bool:
+    """Whether a query is short enough to embed as it is without tokenizing it."""
+    # A character is at most four UTF-8 bytes and a token covers at least one byte.
+    return not isinstance(query, str) or len(query) * 4 <= max_tokens
+
+
+def clip_query_for_embedding(query: str, max_tokens: int = QUERY_EMBEDDING_MAX_TOKENS) -> str:
+    """Keep the start and end of a query too long to embed, so a long pasted prompt still gets retrieval."""
+    if query_fits_embedding(query, max_tokens):
+        return query
+    half = max_tokens // 2
+    try:
+        encoding = tiktoken.get_encoding(QUERY_EMBEDDING_ENCODING)
+        # Bound the text tokenized for very long prompts; only its start and end are kept.
+        window = max_tokens * 16
+        if len(query) <= 2 * window:
+            tokens = encoding.encode(query, disallowed_special=())
+            if len(tokens) <= max_tokens:
+                return query
+            head, tail = tokens[:half], tokens[-half:]
+        else:
+            head = encoding.encode(query[:window], disallowed_special=())[:half]
+            tail = encoding.encode(query[-window:], disallowed_special=())[-half:]
+        return f'{encoding.decode(head)}\n{encoding.decode(tail)}'
+    except Exception as e:
+        log.debug('Tokenizer unavailable for query clipping, using a character bound: %s', e)
+        return f'{query[: max_tokens // 8]}\n{query[-(max_tokens // 8) :]}'
+
+
+def cache_query_embeddings(embedding_function):
+    """Embed each distinct text once for this retrieval, clipped to what the embedding model accepts.
+
+    Every attached file or knowledge base is searched separately with the same queries, and a failed hybrid
+    search falls back to vector search, so without this a query is embedded again for each item and fallback.
+    A failed embedding is reused for the remaining items instead of being retried for each of them.
+    """
+    if embedding_function is None or getattr(embedding_function, 'caches_query_embeddings', False):
+        return embedding_function
+    clips: dict[str, asyncio.Future] = {}
+    batches: dict[tuple[str, str | None], tuple[asyncio.Future, int]] = {}
+
+    async def clip(text):
+        if query_fits_embedding(text):
+            return text
+        # Tokenizing a long query takes tens of milliseconds, so do it once per retrieval and off the event loop.
+        if text not in clips:
+            clips[text] = asyncio.ensure_future(asyncio.to_thread(clip_query_for_embedding, text))
+            clips[text].add_done_callback(lambda done: done.cancelled() or done.exception())
+        return await asyncio.shield(clips[text])
+
+    async def cached_embedding_function(query, prefix=None):
+        texts = [await clip(text) for text in ([query] if isinstance(query, str) else query)]
+        missing = [text for text in dict.fromkeys(texts) if (text, prefix) not in batches]
+        if missing:
+            batch = asyncio.ensure_future(embedding_function(missing, prefix))
+            # Retrieve a failure even if no caller awaits this batch again.
+            batch.add_done_callback(lambda done: done.cancelled() or done.exception())
+            for index, text in enumerate(missing):
+                batches[(text, prefix)] = (batch, index)
+        vectors = []
+        for text in texts:
+            batch, index = batches[(text, prefix)]
+            # Shield the shared batch so one cancelled search does not cancel it for the others.
+            embeddings = await asyncio.shield(batch)
+            if embeddings is None or len(embeddings) <= index:
+                raise ValueError('Embedding generation returned no vector for the query')
+            vectors.append(embeddings[index])
+        return vectors[0] if isinstance(query, str) else vectors
+
+    cached_embedding_function.caches_query_embeddings = True
+    return cached_embedding_function
+
+
 async def get_sources_from_items(
     request,
     items,
@@ -1394,6 +1474,8 @@ async def get_sources_from_items(
     user: UserModel | None = None,
 ):
     log.debug('items: %s %s %s %s %s', items, queries, embedding_function, reranking_function, full_context)
+    embedding_function = cache_query_embeddings(embedding_function)
+    logged_errors = []
 
     context_config = await Config.get_many('rag.bypass_embedding_and_retrieval', 'rag.full_context_char_threshold')
     bypass_embedding_and_retrieval = context_config.get('rag.bypass_embedding_and_retrieval')
@@ -1710,7 +1792,12 @@ async def get_sources_from_items(
                         user=user,
                     )
             except Exception as e:
-                log.exception(e)
+                # A query embedding that failed once fails the same way for every later item.
+                if e in logged_errors:
+                    log.debug('Skipping retrieval for another item after the same error: %s', e)
+                else:
+                    logged_errors.append(e)
+                    log.exception(e)
 
             extracted_collections.extend(collection_names)
 
