@@ -1,5 +1,45 @@
 # Oxy Open WebUI 0.13.3 upgrade and dev validation
 
+## Review fixes for context, retrieval and tool results
+
+Proposed on November 23, 2026 from the OxyGPT review. The base is maintained
+`origin/main` `42f94af5e`, whose tree is identical to `8edd00c54`, the source of
+the current dev and production image `memory-prompt-8edd00c54`. Each change
+needs the owner's explicit approval before a dev build. No schema, dependency,
+Dockerfile or saved-setting change is involved, and existing chats are not
+rewritten.
+
+- **Skill and knowledge manifests once per chat.** Native 0.13.3 adds the
+  hidden `list_available_skills` and `list_attached_knowledge` results to every
+  reply, and every earlier copy is replayed on later turns. This ports official
+  0.13.4 commit `445db6d0b` by hand: `utils/misc.py` gains its
+  `get_tool_results` and `get_last_tool_result`, and `utils/middleware.py` adds a
+  manifest only when the history the model receives does not already end with
+  the same text. The check and explicit-skill preloading run after compaction,
+  so a compaction turn re-adds what the summary removed. Unlike upstream,
+  memory recall keeps its place before compaction, which is unchanged. Retire
+  this overlay when upgrading to 0.13.4 or later.
+- **Bounded retrieval query embeddings.** `retrieval/utils.py` clips a query to
+  8,000 cl100k tokens, keeping its start and end, before embedding. A long
+  query is tokenized once per retrieval in a worker thread, not on the event
+  loop. `get_sources_from_items` embeds each distinct query once for all
+  attached items and fallbacks, and reuses a failed embedding instead of
+  repeating it for every file. Upstream has no equivalent.
+- **Tool result ceiling.** `process_tool_result` keeps at most
+  `TOOL_RESULT_MAX_CHARS` (default 4,000,000) characters of one tool result and
+  appends a note saying how much was cut. Every saved result above about 4 MB
+  since November 10 ended in a failed turn. Upstream has no equivalent; native
+  0.13.3 already fixed the `view_file` line-range read (`ad66f2c41`) that
+  produced the 887 MB chats.
+- **One tool server registry read per request.** `get_tools` reads the shared
+  tool server list and connections once instead of once per attached server.
+  Official 0.13.4 still reads them per server.
+
+Regressions are in `test/backend/test_context_manifests.py`,
+`test/backend/test_retrieval_query_embeddings.py`,
+`test/backend/test_tool_result_limits.py` and
+`test/backend/test_tool_server_reads.py`.
+
 ## Built-in tool editor inheritance correction
 
 On November 11, 2026, the user approved the narrow frontend correction, dev
