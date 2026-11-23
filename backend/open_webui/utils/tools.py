@@ -385,6 +385,9 @@ async def get_tools(request: Request, tool_ids: list[str], user: UserModel, extr
     # Batch-fetch all DB tools in one query instead of one per tool_id
     local_tool_ids = [tool_id for tool_id in tool_ids if not tool_id.startswith('server:')]
     tool_models = await Tools.get_tools_by_ids(local_tool_ids) if local_tool_ids else {}
+    # Read the shared tool server registry and connections once, not once per attached server.
+    tool_servers = None
+    connections = None
 
     for tool_id in tool_ids:
         tool = tool_models.get(tool_id)
@@ -494,8 +497,10 @@ async def get_tools(request: Request, tool_ids: list[str], user: UserModel, extr
                     function_names = server_id_splits[1].split(',')
 
                 if type == 'openapi':
+                    if tool_servers is None:
+                        tool_servers = await get_tool_servers(request)
                     tool_server_data = None
-                    for server in await get_tool_servers(request):
+                    for server in tool_servers:
                         if server['id'] == server_id:
                             tool_server_data = server
                             break
@@ -505,7 +510,8 @@ async def get_tools(request: Request, tool_ids: list[str], user: UserModel, extr
                         continue
 
                     tool_server_idx = tool_server_data.get('idx', 0)
-                    connections = await Config.get('tool_server.connections', [])
+                    if connections is None:
+                        connections = await Config.get('tool_server.connections', [])
                     if tool_server_idx >= len(connections):
                         log.warning(
                             f'Tool server index {tool_server_idx} out of range '
