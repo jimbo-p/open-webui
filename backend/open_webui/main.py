@@ -396,6 +396,10 @@ async def lifespan(app: FastAPI):
 
     await validate_mfa_configuration()
     await initialize_runtime_config(app)
+    # The saved-chat bounds need to know whether context compaction is on before the first chat is opened.
+    from open_webui.models.chats import refresh_compaction_flag
+
+    await refresh_compaction_flag(max_age=0)
     await migrate_legacy_webhook_config()
     request = Request(
         {

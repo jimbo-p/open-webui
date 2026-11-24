@@ -21,8 +21,16 @@ from open_webui.models.automations import AutomationRun
 from open_webui.models.chat_messages import ChatMessage, ChatMessages
 from open_webui.models.folders import Folders
 from open_webui.models.tags import Tag, TagModel, Tags
+from open_webui.utils.chat_bounds import (
+    bound_chat,
+    bound_chat_with_changes,
+    bound_message,
+    bounded_fields,
+    inline_file_ids,
+    keep_saved_shortening,
+)
 from open_webui.utils.misc import get_output_text, sanitize_data_for_db, sanitize_text_for_db
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
 from sqlalchemy import (
     JSON,
     BigInteger,
@@ -49,6 +57,25 @@ from sqlalchemy.sql.expression import bindparam
 
 log = logging.getLogger(__name__)
 ACTIVE_CHAT_GAP_SECONDS = 30 * 60
+# When this worker last read whether context compaction is on (the saved-chat bounds need it before a save).
+_compaction_checked = {'at': float('-inf')}
+
+
+async def refresh_compaction_flag(max_age: float = 60.0) -> None:
+    """Read the compaction setting at most once a minute per worker, so a cold worker's first saves already
+    know which copies the model replays."""
+    now = time.monotonic()
+    if now - _compaction_checked['at'] < max_age:
+        return
+    _compaction_checked['at'] = now
+    try:
+        from open_webui.utils.context_compaction import _load_config
+
+        await _load_config()  # records the flag for the bounds
+    except Exception as error:
+        log.debug('Could not read the context compaction setting: %s', error)
+
+
 CHAT_SEARCH_FILTER_PREFIXES = ('tag:', 'folder:', 'pinned:', 'archived:', 'shared:')
 
 
@@ -267,6 +294,16 @@ class ChatModel(BaseModel):
     def normalize_variables(cls, value):
         return value if isinstance(value, dict) else {}
 
+    @field_validator('chat')
+    @classmethod
+    def bound_saved_chat(cls, value, info: ValidationInfo):
+        # Every load, save, export and share goes through this model, so an oversized chat is served (and saved
+        # back by the frontend) within the saved-chat bounds instead of being copied whole again. Save paths that
+        # have just bounded the chat they store pass context={'bounded': True}.
+        if info.context and info.context.get('bounded'):
+            return value
+        return bound_chat(value)
+
 
 class ChatFile(Base):
     __tablename__ = 'chat_file'
@@ -481,12 +518,73 @@ class ChatTable:
                 return
             message = deepcopy(message)
             yield message
-            message = self._clean_null_bytes(message)
+            message = bound_message(self._clean_null_bytes(message))
             history.setdefault('messages', {})[message_id] = message
             chat.chat = {**(chat.chat or {}), 'history': history}
             flag_modified(chat, 'chat')
             await ChatMessages.upsert_message(
                 message_id, chat_id, message.get('user_id') or chat.user_id, message, db=session
+            )
+
+    async def _write_updated_rows(self, session, chat_item, stored: dict, incoming: dict, bounded_ids: set) -> None:
+        """After update_chat_by_id: write the messages the caller sent that changed, and the bounded columns of
+        older messages the chat budget shortened (a chat without history has neither)."""
+        history_messages = (chat_item.chat.get('history') or {}).get('messages') or {}
+        stored_messages = (stored.get('history') or {}).get('messages') or {}
+        incoming_ids = set((incoming.get('history') or {}).get('messages') or {})
+        for mid in incoming_ids:
+            message = history_messages.get(mid)
+            if message and message.get('role') and message != stored_messages.get(mid):
+                await ChatMessages.upsert_message(
+                    mid, chat_item.id, message.get('user_id') or chat_item.user_id, message, db=session
+                )
+        if bounded_ids - incoming_ids:
+            await self._sync_bounded_rows(
+                session, chat_item.id, chat_item.user_id, history_messages, bounded_ids - incoming_ids
+            )
+
+    @staticmethod
+    async def _droppable_files(session, chat: dict, owner_id: str) -> dict:
+        """Attachments over the inline limit whose text a file record of the chat's owner holds: id -> text length.
+
+        Only those can be read back by the owner from the record; any other copy (another user's file, a clone,
+        an import) keeps its text. Only the length is read, not the text.
+        """
+        ids = inline_file_ids(chat)
+        if not ids:
+            return {}
+        from open_webui.models.files import File
+
+        length = func.length(File.data['content'].as_string())
+        query = select(File.id, length).where(File.id.in_(ids), File.user_id == owner_id)
+        try:
+            # A savepoint, so an unreadable file record only keeps the text and never makes the chat unsavable.
+            async with session.begin_nested():
+                rows = (await session.execute(query)).all()
+        except Exception as error:
+            log.warning('Could not check attachment records; keeping their text: %s', error)
+            return {}
+        return {file_id: size for file_id, size in rows if size}
+
+    async def _drop_checked_files(self, session, chat: dict, owner_id: str) -> dict:
+        droppable = await self._droppable_files(session, chat, owner_id)
+        return bound_chat(chat, droppable_files=droppable) if droppable else chat
+
+    @staticmethod
+    async def _sync_bounded_rows(session, chat_id: str, owner_id: str, messages: dict, message_ids: set[str]) -> None:
+        """Write the bounded columns of messages shortened for the chat budget to their existing chat_message rows.
+
+        A message without a row is left alone: a partial row would replay as a parentless user turn and hide the
+        gap from the backfill, which later writes the whole (bounded) message from the chat.
+        """
+        for message_id in message_ids:
+            message = messages.get(message_id)
+            if not isinstance(message, dict) or not message.get('role'):
+                continue
+            if await session.get(ChatMessage, f'{chat_id}-{message_id}') is None:
+                continue
+            await ChatMessages.upsert_message(
+                message_id, chat_id, message.get('user_id') or owner_id, bounded_fields(message), db=session
             )
 
     def _clean_null_bytes(self, obj):
@@ -687,18 +785,21 @@ class ChatTable:
                 }
             )
 
+            # Attachment text the file records already hold is dropped too (checked here; the model cannot).
+            chat.chat = await self._drop_checked_files(session, chat.chat, user_id)
             chat_item = Chat(**chat.model_dump())
             session.add(chat_item)
             await session.commit()
 
-            # Dual-write initial messages to chat_message table
+            # Dual-write initial messages to chat_message table, from the bounded chat that was stored
             try:
-                history = form_data.chat.get('history') if isinstance(form_data.chat.get('history'), dict) else {}
+                stored = chat.chat or {}
+                history = stored.get('history') if isinstance(stored.get('history'), dict) else {}
                 messages = history.get('messages') if isinstance(history.get('messages'), dict) else {}
-                if not messages and isinstance(form_data.chat.get('messages'), list):
+                if not messages and isinstance(stored.get('messages'), list):
                     messages = {
                         message.get('id'): message
-                        for message in form_data.chat['messages']
+                        for message in stored['messages']
                         if isinstance(message, dict) and message.get('id')
                     }
                 for message_id, message in messages.items():
@@ -818,19 +919,22 @@ class ChatTable:
 
             for form_data in chat_import_forms:
                 chat = self._chat_import_form_to_chat_model(user_id, form_data)
+                # An imported attachment's text is kept unless this instance's file record holds it.
+                chat.chat = await self._drop_checked_files(session, chat.chat, user_id)
                 chats.append(Chat(**chat.model_dump()))
 
             session.add_all(chats)
             await session.commit()
 
-            # Dual-write messages to chat_message table
-            for form_data, imported_chat in zip(chat_import_forms, chats):
-                history = form_data.chat.get('history') if isinstance(form_data.chat.get('history'), dict) else {}
+            # Dual-write messages to chat_message table, from the bounded chats that were stored
+            for imported_chat in chats:
+                stored = imported_chat.chat or {}
+                history = stored.get('history') if isinstance(stored.get('history'), dict) else {}
                 messages = history.get('messages') if isinstance(history.get('messages'), dict) else {}
-                if not messages and isinstance(form_data.chat.get('messages'), list):
+                if not messages and isinstance(stored.get('messages'), list):
                     messages = {
                         message.get('id'): message
-                        for message in form_data.chat['messages']
+                        for message in stored['messages']
                         if isinstance(message, dict) and message.get('id')
                     }
                 for message_id, message in messages.items():
@@ -860,6 +964,7 @@ class ChatTable:
         touch: bool = True,
     ) -> ChatModel | None:
         """Patch top-level chat keys; history is merged so stale writers don't drop messages."""
+        await refresh_compaction_flag()
         try:
             async with self._chat_transaction(id) as (session, chat_item):
                 if chat_item is None:
@@ -879,8 +984,18 @@ class ChatTable:
                         ):
                             updated['history']['messages'][mid] = message
                     updated['history'] = self.merge_history(updated['history'], {})
+                    # A client posting back the full copy of a text the bounds had shortened keeps the shortened one.
+                    merged = updated['history'].get('messages') or {}
+                    for mid in (chat['history'] or {}).get('messages') or {}:
+                        if mid in merged:
+                            merged[mid] = keep_saved_shortening(
+                                (stored.get('history', {}).get('messages') or {}).get(mid), merged[mid]
+                            )
 
                 updated = self._clean_null_bytes(updated)
+                updated, bounded_ids = bound_chat_with_changes(
+                    updated, droppable_files=await self._droppable_files(session, updated, chat_item.user_id)
+                )
                 chat_item.chat = updated
                 chat_item.title = updated.get('title', 'New Chat')
                 if any(key in chat for key in ('history', 'messages', 'currentId', 'branchPointMessageId')):
@@ -889,17 +1004,8 @@ class ChatTable:
                 if touch:
                     chat_item.updated_at = int(time.time())
 
-                for mid in chat.get('history', {}).get('messages') or {}:
-                    message = updated['history']['messages'].get(mid)
-                    if (
-                        message
-                        and message.get('role')
-                        and message != (stored.get('history', {}).get('messages') or {}).get(mid)
-                    ):
-                        await ChatMessages.upsert_message(
-                            mid, id, message.get('user_id') or chat_item.user_id, message, db=session
-                        )
-                return ChatModel.model_validate(chat_item)
+                await self._write_updated_rows(session, chat_item, stored, chat, bounded_ids)
+                return ChatModel.model_validate(chat_item, context={'bounded': True})
         except Exception:
             return
 
@@ -1292,7 +1398,7 @@ class ChatTable:
             return None
 
         messages = row[0] or {}
-        return self._clean_null_bytes(messages.get(message_id, {}))
+        return bound_message(self._clean_null_bytes(messages.get(message_id, {})))
 
     async def get_message_metadata(
         self,
@@ -1412,6 +1518,7 @@ class ChatTable:
 
         message = self._clean_null_bytes(message)
         message_id = self._clean_null_bytes(message_id)
+        await refresh_compaction_flag()
 
         try:
             async with self._chat_transaction(id) as (session, chat_item):
@@ -1422,11 +1529,23 @@ class ChatTable:
                 self._repair_chat_current_id(chat)
 
                 history = chat.get('history', {})
-                saved_message = self.upsert_message_to_history(history, message_id, message)
+                self.upsert_message_to_history(history, message_id, bound_message(message))
+                chat['history'] = history
+                # Keep the whole chat within its budget; the message being saved only gets its own bounds.
+                chat, changed = bound_chat_with_changes(
+                    chat,
+                    keep={message_id},
+                    droppable_files=await self._droppable_files(session, chat, chat_item.user_id),
+                )
+                history = chat['history']
+                saved_message = history['messages'][message_id]
                 await ChatMessages.upsert_message(
                     message_id, id, saved_message.get('user_id') or chat_item.user_id, saved_message, db=session
                 )
-                chat['history'] = history
+                if changed - {message_id}:
+                    await self._sync_bounded_rows(
+                        session, id, chat_item.user_id, history['messages'], changed - {message_id}
+                    )
                 chat_item.chat = chat  # chat is a fresh dict when the column was empty
                 chat_item.title = self._clean_null_bytes(chat.get('title', 'New Chat'))
                 chat_item.current_message_id = self.get_current_message_id(chat)
@@ -1435,7 +1554,7 @@ class ChatTable:
                 if touch:
                     chat_item.updated_at = int(time.time())
 
-                updated_chat = ChatModel.model_validate(chat_item)
+                updated_chat = ChatModel.model_validate(chat_item, context={'bounded': True})
 
             return updated_chat
         except Exception:

@@ -1202,6 +1202,27 @@ VIEW_FILE_DEFAULT_MAX_CHARS = _int_env('VIEW_FILE_DEFAULT_MAX_CHARS', 10_000)
 # configured model's context window, so it only made the turn fail and stayed in the chat on every later turn.
 TOOL_RESULT_MAX_CHARS = _int_env('TOOL_RESULT_MAX_CHARS', 4_000_000)
 
+# Saved-chat bounds (utils/chat_bounds.py). Only saved copies of tool results, citation excerpts and inline file
+# text are bounded; what people type and what models write is never changed. A chat over these sizes could not be
+# replayed to any model anyway, and loading one took several GB of memory on every save and every open.
+CHAT_STORAGE_BOUNDS = os.getenv('CHAT_STORAGE_BOUNDS', 'true').strip().lower() not in ('0', 'false', 'no', 'off')
+# Tool-result characters kept in one saved message (all of its tool results together).
+CHAT_MESSAGE_TOOL_OUTPUT_MAX_CHARS = _int_env('CHAT_MESSAGE_TOOL_OUTPUT_MAX_CHARS', 8_000_000)
+# Characters of one citation excerpt, and of all citation excerpts of one message. The model never reads these.
+CHAT_SOURCE_DOCUMENT_MAX_CHARS = _int_env('CHAT_SOURCE_DOCUMENT_MAX_CHARS', 100_000)
+CHAT_MESSAGE_SOURCES_MAX_CHARS = _int_env('CHAT_MESSAGE_SOURCES_MAX_CHARS', 2_000_000)
+# A file attachment's copied text above this is dropped from the message; it stays in the file record.
+CHAT_INLINE_FILE_CONTENT_MAX_CHARS = _int_env('CHAT_INLINE_FILE_CONTENT_MAX_CHARS', 1_000_000)
+# Tool-result and citation characters kept in one whole chat. Recent work (everything written since the last
+# CHAT_BOUND_PROTECTED_TURNS prompts, and everything under the fork the user is working at) is protected first, as
+# far as this budget allows; replayed tool results never go below CHAT_TRIM_OLD_PREVIEW_CHARS.
+CHAT_STORED_BULK_MAX_CHARS = _int_env('CHAT_STORED_BULK_MAX_CHARS', 16_000_000)
+CHAT_BOUND_PROTECTED_TURNS = _int_env('CHAT_BOUND_PROTECTED_TURNS', 2)
+# A shortened text keeps at least this many characters (its start and end). When a chat is still over its budget
+# after that, its oldest copies are shortened further, oldest message first, to a short preview.
+CHAT_TRIM_PREVIEW_MIN_CHARS = _int_env('CHAT_TRIM_PREVIEW_MIN_CHARS', 20_000)
+CHAT_TRIM_OLD_PREVIEW_CHARS = _int_env('CHAT_TRIM_OLD_PREVIEW_CHARS', 2_000)
+
 # Tools/functions pip options
 
 ENABLE_PLUGINS = os.getenv('ENABLE_PLUGINS', 'True').lower() == 'true'

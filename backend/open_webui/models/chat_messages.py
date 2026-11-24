@@ -9,6 +9,7 @@ from typing import Any, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from open_webui.internal.db import Base, get_async_db_context
+from open_webui.utils.chat_bounds import bound_message
 from open_webui.utils.response import normalize_usage
 from open_webui.utils.session_records import has_pending_tool_approval, normalize_tool_output, recorded_timestamp
 from pydantic import BaseModel, ConfigDict
@@ -240,6 +241,7 @@ class ChatMessageTable:
     @staticmethod
     def _apply_message_data(message: ChatMessage, data: dict, now: int) -> None:
         """Overwrite only the fields the payload carries."""
+        data = bound_message(data)
         if 'role' in data:
             message.role = data['role']
         if 'parent_id' in data or 'parentId' in data:
@@ -275,6 +277,7 @@ class ChatMessageTable:
 
     @staticmethod
     def _build_message(composite_id: str, chat_id: str, user_id: str, data: dict, now: int) -> ChatMessage:
+        data = bound_message(data)
         return ChatMessage(
             id=composite_id,
             chat_id=chat_id,
@@ -439,6 +442,8 @@ class ChatMessageTable:
 
             # Ensure content always has a value
             msg.setdefault('content', '')
+            # Rows saved before the saved-chat bounds reach the model and the frontend bounded as well.
+            msg = bound_message(msg)
 
             # Mirror usage into info.usage for callers that read it there
             if 'usage' in msg:

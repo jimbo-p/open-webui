@@ -8,6 +8,7 @@ from typing import Any
 from fastapi.responses import JSONResponse
 from open_webui.models.chats import Chats
 from open_webui.models.config import Config
+from open_webui.utils.chat_bounds import note_compaction_enabled
 from open_webui.utils.chat_id import is_saved_chat_id
 from open_webui.utils.json_codec import JSONCodec
 from open_webui.utils.misc import get_content_from_message, get_last_user_message, get_message_list
@@ -230,8 +231,11 @@ async def _load_config() -> dict:
         'chat.context_compaction.prompt_template',
     )
     token_threshold = _parse_positive_int(values.get('chat.context_compaction.token_threshold')) or 80000
+    enable = bool(values.get('chat.context_compaction.enable', False))
+    # Saved-chat bounds treat messages before a checkpoint as unread only while compaction is on.
+    note_compaction_enabled(enable)
     return {
-        'enable': bool(values.get('chat.context_compaction.enable', False)),
+        'enable': enable,
         'token_threshold': token_threshold,
         'token_cap': _parse_positive_int(values.get('chat.context_compaction.token_cap')) or token_threshold,
         'retention_percentage': _clamp_retention_percentage(values.get('chat.context_compaction.retention_percentage')),
