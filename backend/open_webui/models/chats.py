@@ -557,7 +557,14 @@ class ChatTable:
 
         length = func.length(File.data['content'].as_string())
         query = select(File.id, length).where(File.id.in_(ids), File.user_id == owner_id)
-        return {file_id: size for file_id, size in (await session.execute(query)).all() if size}
+        try:
+            # A savepoint, so an unreadable file record only keeps the text and never makes the chat unsavable.
+            async with session.begin_nested():
+                rows = (await session.execute(query)).all()
+        except Exception as error:
+            log.warning('Could not check attachment records; keeping their text: %s', error)
+            return {}
+        return {file_id: size for file_id, size in rows if size}
 
     async def _drop_checked_files(self, session, chat: dict, owner_id: str) -> dict:
         droppable = await self._droppable_files(session, chat, owner_id)

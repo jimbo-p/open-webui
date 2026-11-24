@@ -8,17 +8,21 @@ A chat is loaded and saved whole on every turn and every open, so one ~900 MB ch
 2. History is the one source of truth. The top-level ``messages`` list holds the bounded history's copy of every
    message it names, and a citation's copy of a file or page (which nothing reads) is not kept. An attachment's text
    is dropped only when a file record of the chat's owner holds the same text.
-3. Recent work is protected whatever branch a save points at: replies still being written and the message being
-   saved, then, newest first and up to the watermark share of the budget, everything written since the last few
-   prompts and everything under the fork the user is working at (the parent of the newest prompt and of the newest
-   message).
-4. Over the budget, copies are shortened in a fixed order, each group all the way before the next: citation
-   excerpts (never read by the model), then tool results the model no longer replays (other branches, before a
-   compaction checkpoint), then replayed tool results. Replayed results never go below a short preview, even if the
-   chat then stays over budget; only unread copies become notes.
+3. Recent work is protected whatever branch a save points at. Always: the message being saved and replies that can
+   still be running (unfinished and newer than the newest prompt; an older unfinished reply, cut off by a restart or
+   left at an approval pause, is ranked like any other message). Then, up to the watermark share of the budget and
+   most needed first: every reply at the fork the user is working at (the parent of the newest prompt and of the
+   newest message: the previous attempt, other models' replies, the answer to a prompt before it was edited), the
+   newest turns of the branches the model replays, and the rest of the recent work (everything written since the
+   last few prompts, and everything under those forks), newest first.
+4. Over the budget, one rule for notes: nothing on a branch the model replays ever goes below a short preview, even
+   if the chat then stays over budget, and copies off those branches become notes only as the last step, while the
+   chat is still over the budget. The order: citation excerpts (never read by the model) and then off-branch tool
+   results, down toward the watermark; then on-branch tool results (those before a compaction checkpoint first) only
+   as far as the budget needs; then, if still over, off-branch previews and citation excerpts to notes.
 5. A shortened text keeps its start and end and says how much was removed, counted from the original length, so the
-   bounds are stable on their own output; caps are stepped, and an over-budget chat is brought down to a watermark
-   where previews allow, so steady growth does not re-shorten on every save.
+   bounds are stable on their own output. Caps are stepped (at most 1.5x apart), and unread copies are brought down
+   toward a watermark, so steady growth does not re-shorten on every save.
 
 Inputs are never modified: a message that needs bounding is copied first, because callers such as the tool loop
 keep using their live objects for the model.
@@ -55,10 +59,15 @@ _NOTE = re.compile(
 )
 # Tool calls whose results hold what a person answered or context the model must keep whole.
 KEPT_CALL_NAMES = frozenset({'ask_user'})
-# Caps are rounded down to these multiples of the preview floor, so they do not creep save by save.
-STEP_MULTIPLES = (1, 2.5, 5, 10, 25, 50, 100, 200)
-# An over-budget chat is brought down to this share of the budget where previews allow it.
+# Caps are rounded down to these multiples of the preview floor (at most 1.5x apart), so they do not creep save by
+# save, and a step down is always a real cut.
+STEP_MULTIPLES = (1, 1.5, 2, 3, 4, 5, 7.5, 10, 15, 20, 30, 40, 50, 75, 100, 150, 200)
+# Copies the model never reads are brought down toward this share of the budget, and recent work may take it.
 WATERMARK = 0.75
+# Copies the model replays are brought down toward this share, by cutting texts not shortened before; texts already
+# shortened are cut again only as far as the budget itself needs. That leaves room for the next turns without
+# re-cutting the same results on every save.
+REPLAYED_TARGET = 0.9
 # A file's copied text dropped from a message is marked, so a reader knows to use the file record.
 OMITTED_MARK = 'content_in_file_record'
 
@@ -428,9 +437,11 @@ def _replayed(view: dict, branch: list[str]) -> set[str]:
 
 @dataclass
 class Layout:
-    """Which messages the chat budget never shortens, and which the model replays."""
+    """Which messages the chat budget never shortens, which are on a branch the model replays, and which of those
+    it reads now (after the latest compaction checkpoint)."""
 
     protected: set = field(default_factory=set)
+    branch: set = field(default_factory=set)
     replayed: set = field(default_factory=set)
 
 
@@ -448,26 +459,58 @@ def _recent(view: dict, children: dict, by_age: list[str], turns: int) -> set[st
     return recent
 
 
+def _running(view: dict, by_age: list[str], keep) -> set[str]:
+    """The message being saved, and replies that can still be running: unfinished and newer than the newest prompt.
+
+    An older unfinished reply (cut off by a restart, or left at an approval pause) is not running any more; it is
+    ranked like any other message.
+    """
+    prompts = [key for key in by_age if view[key].get('role') == 'user']
+    newest_prompt = _stamp(view, prompts[-1]) if prompts else float('-inf')
+    running = {key for key in keep if key in view}
+    running |= {key for key in view if view[key].get('done') is False and _stamp(view, key) >= newest_prompt}
+    return running
+
+
 def chat_layout(messages: dict, current_id: str | None = None, keep=()) -> Layout:
-    """Protected and replayed messages of a message map (rules 3 and 4 of the module docstring)."""
+    """Protected, on-branch and replayed messages of a message map (rules 3 and 4 of the module docstring)."""
     limits = _limits()
     view = {key: value for key, value in messages.items() if isinstance(value, dict)}
     children = _children(view)
     by_age = sorted(view, key=lambda key: (_stamp(view, key), key))
-    layout = Layout(protected={key for key in keep if key in view})
-    layout.protected |= {key for key in view if view[key].get('done') is False}
-    used = sum(saved_text_length(view[key]) for key in layout.protected)
-    # Recent work may take up to the watermark, so the rest of the conversation keeps room for its own previews.
-    allowance = int(limits.chat_bulk * WATERMARK)
-    recent = _recent(view, children, by_age, limits.recent_turns) - layout.protected
-    for key in sorted(recent, key=lambda key: (_stamp(view, key), key), reverse=True):
-        size = saved_text_length(view[key])
-        if used + size > allowance:
-            break  # what does not fit is shortened like any older copy
-        layout.protected.add(key)
-        used += size
+    layout = Layout(protected=_running(view, by_age, keep))
+    branches = []
     for start in ([current_id] if current_id in view else []) + by_age[-1:]:
-        layout.replayed |= _replayed(view, _branch(view, _leaf(view, children, start)))
+        branch = _branch(view, _leaf(view, children, start))
+        branches.append(branch)
+        layout.branch |= set(branch)
+        layout.replayed |= _replayed(view, branch)
+
+    def newest_first(keys):
+        return sorted(keys, key=lambda key: (_stamp(view, key), key), reverse=True)
+
+    # Recent work, most needed first: every reply at the fork the user is working at (the previous attempt, other
+    # models' replies, the answer to a prompt before it was edited), then the newest turns of the branches the model
+    # replays, then the rest of the recent work, newest first; all within the watermark share of the budget.
+    forks = {view[key].get('parentId') for key in by_age[-1:]}
+    prompts = [key for key in by_age if view[key].get('role') == 'user']
+    forks |= {view[key].get('parentId') for key in prompts[-1:]}
+    ranked = []
+    for child in newest_first({child for fork in forks for child in children.get(fork, [])}):
+        # Each reply at the fork, or each prompt there with its newest reply (an edited-away prompt's answer).
+        ranked += [child, *newest_first(children.get(child, []))[:1]]
+    for branch in branches:
+        ranked += branch[-2 * max(limits.recent_turns, 1) :][::-1]
+    ranked += newest_first(_recent(view, children, by_age, limits.recent_turns))
+    allowance = int(limits.chat_bulk * WATERMARK)
+    used = sum(saved_text_length(view[key]) for key in layout.protected)
+    for key in dict.fromkeys(ranked):
+        if key in layout.protected:
+            continue
+        size = saved_text_length(view[key])
+        if used + size <= allowance:
+            layout.protected.add(key)
+            used += size
     return layout
 
 
@@ -490,71 +533,95 @@ class _Fit:
         self.total = _total(slots)
 
     def _shorten(self, group: tuple[str, str], cap: int, above: int) -> None:
-        """Shorten one message's texts of one kind longer than ``above`` to ``cap``.
-
-        A text that already carries a saved-copy note is left alone unless it is well above the new cap.
-        """
+        """Shorten one message's texts of one kind longer than ``above`` to ``cap``."""
         key, kind = group
-        message = self.view[key]
-        targets = {}
-        for slot_kind, path, length in self.slots[key]:
-            if slot_kind != kind or length <= above:
-                continue
-            if length <= cap * 3 // 2 and has_bound_note(_get(message, path)):
-                continue
-            targets[path] = (kind, cap)
+        targets = {
+            path: (kind, cap) for slot_kind, path, length in self.slots[key] if slot_kind == kind and length > above
+        }
         if not targets:
             return
         before = sum(length for _, _, length in self.slots[key])
-        self.view[key] = _apply(message, targets, [])
+        self.view[key] = _apply(self.view[key], targets, [])
         self.changed.add(key)
         self.slots[key] = _slots(self.view[key])
         self.total -= before - sum(length for _, _, length in self.slots[key])
 
-    def shrink(self, groups: list, target: int, *, short_target: int, notes: bool) -> None:
-        """Bring ``groups`` (oldest first) down: one stepped preview cap, largest first, aiming at ``target``; then,
-        while over ``short_target``, oldest first to the short preview; then, if ``notes``, to a note."""
-        if not groups:
+    def _cap(self, groups: list, target: int, fresh_only: bool) -> None:
+        """One stepped cap, largest first, toward ``target``, on the texts of ``groups`` (only those not shortened
+        before, if ``fresh_only``)."""
+        texts = [
+            (group, path, length)
+            for group in groups
+            for kind, path, length in self.slots[group[0]]
+            if kind == group[1] and not (fresh_only and has_bound_note(_get(self.view[group[0]], path)))
+        ]
+        if not texts or self.total <= target:
             return
-        if self.total > target:
-            lengths = [length for group in groups for length in _lengths(self.slots, group)]
-            cap = _cap_for(lengths, max(target - (self.total - sum(lengths)), 0))
-            if cap is not None:
-                cap = _step_down(max(cap, self.limits.floor), self.limits.floor)
-                for group in groups:
-                    self._shorten(group, cap, cap)
+        lengths = [length for _, _, length in texts]
+        cap = _cap_for(lengths, max(target - (self.total - sum(lengths)), 0))
+        if cap is None:
+            return
+        cap = _step_down(max(cap, self.limits.floor), self.limits.floor)
+        chosen: dict[tuple, set] = {}
+        for group, path, length in texts:
+            if length > cap:
+                chosen.setdefault(group, set()).add(path)
+        for group, paths in chosen.items():
+            self._shorten_paths(group, paths, cap)
+
+    def _shorten_paths(self, group: tuple[str, str], paths: set, cap: int) -> None:
+        key, kind = group
+        before = sum(length for _, _, length in self.slots[key])
+        self.view[key] = _apply(self.view[key], {path: (kind, cap) for path in paths}, [])
+        self.changed.add(key)
+        self.slots[key] = _slots(self.view[key])
+        self.total -= before - sum(length for _, _, length in self.slots[key])
+
+    def previews(self, groups: list, target: int, recut_target: int | None = None) -> None:
+        """Bring ``groups`` (oldest first) down: a stepped preview cap on texts not shortened before, toward
+        ``target``; then, while over ``recut_target`` (default ``target``), a stepped cap on all of them; then,
+        while still over it, oldest first to the short preview. Never below the short preview."""
+        recut_target = target if recut_target is None else recut_target
+        if not groups or self.total <= recut_target:
+            return
+        self._cap(groups, target, fresh_only=True)
+        self._cap(groups, recut_target, fresh_only=False)
         for group in groups:
-            if self.total <= short_target:
-                break
+            if self.total <= recut_target:
+                return
             self._shorten(group, self.limits.old_preview, self.limits.old_preview)
-        if not notes:
-            return
+
+    def notes(self, groups: list, target: int) -> None:
+        """Oldest first, a short preview to a note, while the chat is over ``target``."""
         for group in groups:
-            if self.total <= short_target:
-                break
+            if self.total <= target:
+                return
             self._shorten(group, 0, _removed_note_length(group[1]) * 3 // 2)
 
 
 def _fit_chat(view: dict, slots: dict, layout: Layout, limits: SimpleNamespace, changed: set[str]) -> None:
-    """Shorten saved copies once the chat is over its budget (rule 4 of the module docstring)."""
+    """Shorten saved copies once the chat is over its budget (rule 4 of the module docstring).
+
+    One rule for notes: nothing on a branch the model replays ever goes below the short preview, and copies off those
+    branches (and citation excerpts) become notes only as the last step, while the chat is still over the budget.
+    """
     fit = _Fit(view, slots, limits, changed)
     if fit.total <= limits.chat_bulk:
         return
     order = sorted((key for key in slots if key not in layout.protected), key=lambda key: (_stamp(view, key), key))
     citations = [(key, 'source') for key in order]
-    unread = [(key, 'tool') for key in order if key not in layout.replayed]
+    off_branch = [(key, 'tool') for key in order if key not in layout.branch]
+    before_checkpoint = [(key, 'tool') for key in order if key in layout.branch and key not in layout.replayed]
     replayed = [(key, 'tool') for key in order if key in layout.replayed]
-    # The watermark applies where unread copies (down to notes) and replayed previews can reach it.
-    lowest = fit.total
-    for group in citations + unread:
-        lowest -= sum(max(n - _removed_note_length(group[1]), 0) for n in _lengths(slots, group))
-    for group in replayed:
-        lowest -= sum(max(n - limits.floor, 0) for n in _lengths(slots, group))
     watermark = int(limits.chat_bulk * WATERMARK)
-    target = watermark if lowest <= watermark else limits.chat_bulk
-    fit.shrink(citations, target, short_target=target, notes=True)
-    fit.shrink(unread, target, short_target=target, notes=True)
-    fit.shrink(replayed, target, short_target=limits.chat_bulk, notes=False)
+    # What the model never reads goes first, down toward the watermark (room for the next turns).
+    fit.previews(citations, watermark)
+    fit.previews(off_branch, watermark)
+    # What it reads on a branch: fresh results toward REPLAYED_TARGET, shortened ones only as far as the budget needs.
+    replayed_target = int(limits.chat_bulk * REPLAYED_TARGET)
+    fit.previews(before_checkpoint, replayed_target, limits.chat_bulk)
+    fit.previews(replayed, replayed_target, limits.chat_bulk)
+    fit.notes(citations + off_branch, limits.chat_bulk)
 
 
 def bound_messages_map(

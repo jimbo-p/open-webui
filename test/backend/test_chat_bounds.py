@@ -289,14 +289,16 @@ def test_other_replies_to_the_newest_prompt_are_protected(small_limits):
     assert 'b3' not in changed and bounded['b3'] is messages['b3']
 
 
-def test_unread_copies_go_all_the_way_before_replayed_results_are_previewed(small_limits):
+def test_off_branch_copies_are_previews_before_replayed_results_are_touched_and_notes_only_last(small_limits):
     messages = chain(4, [3_500])
     messages['u1']['childrenIds'].insert(0, 'b1')
     messages['b1'] = tool_message('b1', [3_500], parent='u1', timestamp=3.5)  # an older regeneration
     bounded, changed = bound_messages_map(messages, 'a3')
-    assert bulk(bounded) <= 7_500
-    assert output_texts(bounded['b1'])[0].startswith('[Saved copy removed')  # unread: may become a note
+    assert bulk(bounded) <= 10_000
+    old_attempt = output_texts(bounded['b1'])[0]
+    assert 'Saved copy shortened' in old_attempt and not old_attempt.startswith('[Saved copy removed')
     assert all(len(output_texts(bounded[key])[0]) >= 900 for key in ('a0', 'a1', 'a2'))  # replayed: previews
+    assert bounded['a3'] is messages['a3']
 
 
 def test_replayed_results_never_go_below_the_short_preview(small_limits):
@@ -321,7 +323,7 @@ def test_a_chat_that_fits_after_short_previews_keeps_its_newer_results_whole(sma
 def test_steady_growth_does_not_reshorten_the_chat_on_every_save(small_limits):
     messages = chain(4, [3_500])
     bounded, changed = bound_messages_map(messages, 'a3')
-    assert changed == {'a0', 'a1', 'a2'} and bulk(bounded) <= 7_500
+    assert changed and bulk(bounded) <= 10_000
     grown = copy.deepcopy(bounded)
     grown['a3']['childrenIds'] = ['u4']
     grown['u4'] = {'id': 'u4', 'parentId': 'a3', 'childrenIds': ['a4'], 'role': 'user', 'timestamp': 9}
@@ -329,8 +331,8 @@ def test_steady_growth_does_not_reshorten_the_chat_on_every_save(small_limits):
     assert bound_messages_map(grown, 'a4') == (grown, set())  # still under the budget: nothing is rewritten
     grown['a4'] = tool_message('a4', [3_500], parent='u4', timestamp=10)
     regrown, changed = bound_messages_map(grown, 'a4')
-    assert changed == {'a3'}  # only the reply that left the protected tail
-    assert regrown['a1'] is grown['a1'] and regrown['a2'] is grown['a2']
+    assert changed == {'a3'}  # only the result not shortened before; the others are cut again only if needed
+    assert all(regrown[key] is grown[key] for key in ('a0', 'a1', 'a2'))
     assert 'of 3,507 characters' in output_texts(regrown['a0'])[0]
 
 
@@ -347,14 +349,16 @@ def test_a_reply_still_being_written_and_the_message_being_saved_keep_their_resu
 
 
 def test_compacted_history_is_shortened_first_only_while_compaction_is_on(small_limits, monkeypatch):
-    messages = chain(3, [3_500])
-    messages['a1']['contextSummary'] = 'Earlier turns, summarized.'
-    bounded, _ = bound_messages_map(messages, 'a2')
-    assert len(output_texts(bounded['a0'])[0]) == len(output_texts(bounded['a1'])[0])  # both still replayed
+    messages = chain(5, [3_500])
+    messages['a2']['contextSummary'] = 'Earlier turns, summarized.'
+    bounded, _ = bound_messages_map(messages, 'a4')
+    assert len(output_texts(bounded['a1'])[0]) == len(output_texts(bounded['a2'])[0])  # all still replayed
     monkeypatch.setitem(chat_bounds._compaction, 'enabled', True)
-    bounded, _ = bound_messages_map(messages, 'a2')
-    assert len(output_texts(bounded['a0'])[0]) <= 1_000 < len(output_texts(bounded['a1'])[0])
-    assert bounded['a2'] is messages['a2']
+    bounded, _ = bound_messages_map(messages, 'a4')
+    before, after = [len(output_texts(bounded[key])[0]) for key in ('a0', 'a1')], len(output_texts(bounded['a2'])[0])
+    assert max(before) <= 300 < after  # before the checkpoint goes first...
+    texts = [text for key in ('a0', 'a1', 'a2') for text in output_texts(bounded[key])]
+    assert not any(text.startswith('[Saved copy removed') for text in texts)  # ...but never to a note
 
 
 def test_the_chat_model_serves_and_saves_bounded_chats_and_the_switch_turns_it_off(small_limits, monkeypatch):
@@ -793,3 +797,85 @@ async def test_saves_read_the_compaction_setting_first(small_limits, chat_db, mo
     await Chats.update_chat_by_id('c', {'title': 'T'})
     await Chats.upsert_message_to_chat_by_id_and_message_id('c', 'a0', {'content': 'x'})
     assert refresh.await_count == 2
+
+
+# Round-4 scenarios
+
+
+def test_an_interrupted_reply_left_unfinished_is_not_protected_ahead_of_recent_work(small_limits, monkeypatch):
+    monkeypatch.setattr(env, 'CHAT_BOUND_PROTECTED_TURNS', 2)
+    messages = chain(5, [1_500])
+    messages['a1'] = tool_message('a1', [3_000, 2_900], parent='u1', done=False, timestamp=4)  # cut off long ago
+    messages['a1']['childrenIds'] = ['u2']
+    layout = chat_bounds.chat_layout(messages, 'a4')
+    assert 'a1' not in layout.protected and {'a3', 'a4'} <= layout.protected
+    bounded, _ = bound_messages_map(messages, 'a4')
+    assert bounded['a3'] is messages['a3']  # the previous turn the model replays next keeps its result
+    still_running = copy.deepcopy(messages)
+    still_running['a4']['done'] = False
+    assert 'a4' in chat_bounds.chat_layout(still_running, 'a4').protected
+
+
+def test_regenerating_an_early_turn_of_a_long_chat_keeps_the_previous_attempt_and_the_branch_it_continues(
+    small_limits,
+):
+    messages = chain(12, [700])
+    messages['u2']['childrenIds'] = ['a2', 'a2b']
+    messages['a2b'] = tool_message('a2b', [1_000], parent='u2', timestamp=30)
+    bounded, changed = bound_messages_map(messages, 'a2b')
+    assert bounded['a2'] is messages['a2']  # the previous attempt, at the fork
+    assert bounded['a0'] is messages['a0'] and bounded['a1'] is messages['a1']  # what the new branch replays
+    assert bulk(bounded) <= 10_000
+    for key in changed:  # only deeper turns of the abandoned branch, and never to a note
+        assert key not in ('a0', 'a1', 'a2', 'a2b')
+        assert not output_texts(bounded[key])[0].startswith('[Saved copy removed')
+
+
+def test_editing_a_prompt_before_the_checkpoint_never_replays_notes(small_limits, monkeypatch):
+    monkeypatch.setitem(chat_bounds._compaction, 'enabled', True)
+    messages = chain(8, [1_400])
+    messages['u5']['contextSummary'] = 'Earlier turns, summarized.'
+    bounded, _ = bound_messages_map(messages, 'a7')
+    for key in ('a0', 'a1', 'a2', 'a3', 'a4'):  # before the checkpoint: a preview at most, never a note
+        assert not output_texts(bounded[key])[0].startswith('[Saved copy removed')
+    # The user edits u2: the new branch has no checkpoint and replays a0 and a1 as they are stored.
+    bounded['a1']['childrenIds'].append('u2e')
+    bounded['u2e'] = {'id': 'u2e', 'parentId': 'a1', 'childrenIds': [], 'role': 'user', 'timestamp': 40}
+    edited, _ = bound_messages_map(bounded, 'u2e')
+    assert all(len(output_texts(edited[key])[0]) >= 250 for key in ('a0', 'a1'))
+
+
+def test_off_branch_copies_become_notes_only_when_previews_leave_the_chat_over_budget(small_limits):
+    messages = chain(3, [3_000])
+    for index in range(3):  # three older attempts at the first answer
+        key = f'r{index}'
+        messages[key] = tool_message(key, [3_000], parent='u0', timestamp=1.1 + index / 10)
+        messages['u0']['childrenIds'].insert(0, key)
+    bounded, _ = bound_messages_map(messages, 'a2')
+    attempts = [output_texts(bounded[f'r{index}'])[0] for index in range(3)]
+    assert all('Saved copy shortened' in text for text in attempts)  # previews suffice: no notes
+    many = chain(2, [3_000])
+    for index in range(40):
+        key = f'r{index}'
+        many[key] = tool_message(key, [3_000], parent='u0', timestamp=1.1 + index / 100)
+    noted, _ = bound_messages_map(many, 'a1')
+    texts = [output_texts(noted[f'r{index}'])[0] for index in range(40)]
+    assert any(text.startswith('[Saved copy removed') for text in texts)  # still over with previews: oldest go
+    assert texts[-1].startswith('[Saved copy removed') is False  # the newest attempts last
+    assert bulk(noted) <= 10_000
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_file_record_never_makes_a_chat_unsavable(small_limits, chat_db):
+    from sqlalchemy import text
+
+    attachment = {'type': 'file', 'id': 'f1', 'file': {'data': {'content': 'x' * 900}}}
+    messages = {'u0': {'id': 'u0', 'parentId': None, 'childrenIds': [], 'role': 'user', 'files': [attachment]}}
+    await seed_chat(chat_db, messages, 'u0')
+    async with chat_db() as session:
+        await session.execute(text('DROP TABLE file'))  # the attachment check cannot run
+        await session.commit()
+    assert await Chats.update_chat_by_id('c', {'title': 'Renamed'}) is not None
+    chat, _ = await stored(chat_db)
+    assert chat['title'] == 'Renamed'
+    assert chat['history']['messages']['u0']['files'][0]['file']['data']['content'] == 'x' * 900
