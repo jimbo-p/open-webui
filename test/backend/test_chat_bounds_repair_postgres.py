@@ -176,33 +176,34 @@ def test_restore_refuses_after_newer_work_unless_forced(small_limits, database, 
 
 def test_a_chat_that_changes_while_it_is_repaired_is_skipped(small_limits, database, tmp_path, monkeypatch):
     seed(database)
-    original_plan = chat_bounds_repair.plan_rows
+    original_read_rows = chat_bounds_repair.read_rows
     import psycopg
 
-    def plan_and_meanwhile_edit(row_messages, current_id):
+    def read_rows_and_meanwhile_edit(connection, chat_id):
         writer = psycopg.connect(os.environ['DATABASE_URL'], autocommit=True)
         writer.execute("UPDATE chat SET chat = json_build_object('title', 'edited') WHERE id = 'big'")
         writer.close()
-        return original_plan(row_messages, current_id)
+        return original_read_rows(connection, chat_id)
 
-    monkeypatch.setattr(chat_bounds_repair, 'plan_rows', plan_and_meanwhile_edit)
+    monkeypatch.setattr(chat_bounds_repair, 'read_rows', read_rows_and_meanwhile_edit)
     assert run('--min-mb', '0', '--apply', '--backup-dir', str(tmp_path)) == 1
     assert json.loads(chat_text(database)) == {'title': 'edited'}
+    assert not list(tmp_path.iterdir())  # nothing was written, so no backup is left to roll it back
 
 
 def test_failures_are_reported_and_the_run_continues(small_limits, database, tmp_path, monkeypatch, capsys):
     seed(database, 'big')
     seed(database, 'other')
-    original_plan = chat_bounds_repair.plan_chat
     calls = []
 
-    def fail_once(chat):
-        calls.append(1)
-        if len(calls) == 1:
-            raise RuntimeError('boom')
-        return original_plan(chat)
+    class FailOnce(chat_bounds_repair.ChatPlan):
+        def __init__(self, *args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError('boom')
+            super().__init__(*args, **kwargs)
 
-    monkeypatch.setattr(chat_bounds_repair, 'plan_chat', fail_once)
+    monkeypatch.setattr(chat_bounds_repair, 'ChatPlan', FailOnce)
     assert run('--min-mb', '0', '--apply', '--backup-dir', str(tmp_path)) == 1
     out = capsys.readouterr().out
     assert 'FAILED (RuntimeError: boom)' in out and '1 failed' in out and '1 shrunk' in out
@@ -212,7 +213,64 @@ def test_max_mb_leaves_larger_chats_alone(small_limits, database, tmp_path, caps
     original = seed(database, size=300_000)
     assert run('--min-mb', '0', '--max-mb', '0.01', '--apply', '--backup-dir', str(tmp_path)) == 0
     assert chat_text(database) == original
-    assert 'above --max-mb' in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert 'above --max-mb' in out and 'MB stored' in out  # uncompressed and stored sizes are both listed
+
+
+def test_sizes_only_lists_without_reading_the_chats(small_limits, database, tmp_path, capsys, monkeypatch):
+    original = seed(database)
+    monkeypatch.setattr(chat_bounds_repair, 'read_chat', lambda *args: pytest.fail('read during --sizes-only'))
+    assert run('--min-mb', '0', '--sizes-only') == 0
+    assert chat_text(database) == original and 'chat JSON' in capsys.readouterr().out
+
+
+def test_rows_get_the_chat_decisions_with_a_stale_current_id_and_a_missing_row(small_limits, database, tmp_path):
+    seed(database, turns=8, size=300_000)
+    database.execute("DELETE FROM chat_message WHERE id = 'big-u3'")  # a row that was never written
+    stale = json.loads(chat_text(database))
+    stale['history']['currentId'] = 'a4'  # a tab that saved before the newest turns
+    database.execute(
+        "UPDATE chat SET chat = %s::json, current_message_id = 'a4' WHERE id = 'big'", (json.dumps(stale),)
+    )
+    newest_row = row_text(database, 'big-a7')
+    assert run('--min-mb', '0', '--apply', '--backup-dir', str(tmp_path)) == 0
+    chat = json.loads(chat_text(database))['history']['messages']
+    assert row_text(database, 'big-a7') == newest_row  # the newest turn keeps its replay row whole
+    assert 'Saved copy shortened' in chat['a0']['output'][1]['output'][0]['text']
+    for key in ('a0', 'a1', 'a2', 'a5', 'a6'):
+        assert json.loads(row_text(database, f'big-{key}')) == chat[key]['output']  # both stores agree
+
+
+def test_restoring_a_chat_already_as_backed_up_does_nothing(small_limits, database, tmp_path, capsys):
+    original = seed(database)
+    assert run('--min-mb', '0', '--apply', '--backup-dir', str(tmp_path)) == 0
+    [manifest_path] = list(tmp_path.glob('*.manifest.json'))
+    assert run('--restore', str(manifest_path)) == 0
+    capsys.readouterr()
+    assert run('--restore', str(manifest_path), '--force') == 0
+    assert 'already as backed up' in capsys.readouterr().out and chat_text(database) == original
+
+
+def test_the_repair_reads_whether_compaction_is_on(small_limits, database, capsys):
+    seed(database)
+    database.execute('CREATE TABLE config (key text primary key, value json, updated_at bigint)')
+    database.execute("INSERT INTO config VALUES ('chat.context_compaction.enable', 'true', 0)")
+    assert run('--min-mb', '0') == 0
+    assert 'context compaction is on' in capsys.readouterr().out
+
+
+def test_attachment_text_is_dropped_only_where_this_instance_holds_the_file(small_limits, database, tmp_path):
+    database.execute('CREATE TABLE file (id text primary key, data json)')
+    database.execute("""INSERT INTO file VALUES ('here', '{"content": "kept in the record"}')""")
+    seed(database)
+    chat = json.loads(chat_text(database))
+    chat['history']['messages']['u0']['files'] = [
+        {'type': 'file', 'id': file_id, 'file': {'data': {'content': 'x' * 6_000}}} for file_id in ('here', 'gone')
+    ]
+    database.execute("UPDATE chat SET chat = %s::json WHERE id = 'big'", (json.dumps(chat),))
+    assert run('--min-mb', '0', '--apply', '--backup-dir', str(tmp_path)) == 0
+    here, gone = json.loads(chat_text(database))['history']['messages']['u0']['files']
+    assert 'content' not in here['file']['data'] and gone['file']['data']['content'] == 'x' * 6_000
 
 
 def test_a_concurrent_writer_waits_only_briefly(small_limits, database, tmp_path):

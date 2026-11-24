@@ -647,3 +647,23 @@ async def test_attachment_text_is_dropped_only_when_its_file_record_holds_it(sma
     kept, elsewhere = chat['history']['messages']['u0']['files']
     assert 'content' not in kept['file']['data'] and kept['file']['data'][chat_bounds.OMITTED_MARK] is True
     assert elsewhere['file']['data']['content'] == 'x' * 900  # an imported chat's only copy
+
+
+def test_the_repair_gives_rows_the_chat_decisions_even_with_a_stale_current_id_or_a_missing_row(small_limits):
+    from open_webui.utils.chat_bounds_repair import ChatPlan, rows_to_messages
+
+    messages = chain(5, [3_500])
+    chat = {'title': 'T', 'history': {'messages': messages, 'currentId': 'a2'}}  # a stale tab's current id
+    rows = [
+        (f'c-{key}', m.get('parentId'), m['role'], json.dumps(m['output']) if 'output' in m else None,
+         None, None, None, m['timestamp'], True)
+        for key, m in messages.items()
+        if key != 'u2'  # a message whose row was never written
+    ]  # fmt: skip
+    plan = ChatPlan(chat, 'a2')
+    bounded = plan.bounded_chat['history']['messages']
+    assert bounded['a4'] is messages['a4']  # the newest turn, whatever the current id says
+    updates = plan.row_updates(rows_to_messages('c', rows))
+    assert 'a4' not in updates and 'a3' in updates
+    for key, columns in updates.items():
+        assert columns['output'] == bounded[key]['output']  # the same decisions as the chat JSON
