@@ -57,6 +57,25 @@ from sqlalchemy.sql.expression import bindparam
 
 log = logging.getLogger(__name__)
 ACTIVE_CHAT_GAP_SECONDS = 30 * 60
+# When this worker last read whether context compaction is on (the saved-chat bounds need it before a save).
+_compaction_checked = {'at': float('-inf')}
+
+
+async def refresh_compaction_flag(max_age: float = 60.0) -> None:
+    """Read the compaction setting at most once a minute per worker, so a cold worker's first saves already
+    know which copies the model replays."""
+    now = time.monotonic()
+    if now - _compaction_checked['at'] < max_age:
+        return
+    _compaction_checked['at'] = now
+    try:
+        from open_webui.utils.context_compaction import _load_config
+
+        await _load_config()  # records the flag for the bounds
+    except Exception as error:
+        log.debug('Could not read the context compaction setting: %s', error)
+
+
 CHAT_SEARCH_FILTER_PREFIXES = ('tag:', 'folder:', 'pinned:', 'archived:', 'shared:')
 
 
@@ -525,22 +544,23 @@ class ChatTable:
             )
 
     @staticmethod
-    async def _droppable_files(session, chat: dict) -> frozenset:
-        """Attachments whose copied text is over the inline limit and whose file record holds text of its own."""
+    async def _droppable_files(session, chat: dict, owner_id: str) -> dict:
+        """Attachments over the inline limit whose text a file record of the chat's owner holds: id -> text length.
+
+        Only those can be read back by the owner from the record; any other copy (another user's file, a clone,
+        an import) keeps its text. Only the length is read, not the text.
+        """
         ids = inline_file_ids(chat)
         if not ids:
-            return frozenset()
+            return {}
         from open_webui.models.files import File
 
-        rows = (await session.execute(select(File.id, File.data).where(File.id.in_(ids)))).all()
-        return frozenset(
-            file_id
-            for file_id, data in rows
-            if isinstance(data, dict) and isinstance(data.get('content'), str) and data['content']
-        )
+        length = func.length(File.data['content'].as_string())
+        query = select(File.id, length).where(File.id.in_(ids), File.user_id == owner_id)
+        return {file_id: size for file_id, size in (await session.execute(query)).all() if size}
 
-    async def _drop_checked_files(self, session, chat: dict) -> dict:
-        droppable = await self._droppable_files(session, chat)
+    async def _drop_checked_files(self, session, chat: dict, owner_id: str) -> dict:
+        droppable = await self._droppable_files(session, chat, owner_id)
         return bound_chat(chat, droppable_files=droppable) if droppable else chat
 
     @staticmethod
@@ -759,7 +779,7 @@ class ChatTable:
             )
 
             # Attachment text the file records already hold is dropped too (checked here; the model cannot).
-            chat.chat = await self._drop_checked_files(session, chat.chat)
+            chat.chat = await self._drop_checked_files(session, chat.chat, user_id)
             chat_item = Chat(**chat.model_dump())
             session.add(chat_item)
             await session.commit()
@@ -893,7 +913,7 @@ class ChatTable:
             for form_data in chat_import_forms:
                 chat = self._chat_import_form_to_chat_model(user_id, form_data)
                 # An imported attachment's text is kept unless this instance's file record holds it.
-                chat.chat = await self._drop_checked_files(session, chat.chat)
+                chat.chat = await self._drop_checked_files(session, chat.chat, user_id)
                 chats.append(Chat(**chat.model_dump()))
 
             session.add_all(chats)
@@ -937,6 +957,7 @@ class ChatTable:
         touch: bool = True,
     ) -> ChatModel | None:
         """Patch top-level chat keys; history is merged so stale writers don't drop messages."""
+        await refresh_compaction_flag()
         try:
             async with self._chat_transaction(id) as (session, chat_item):
                 if chat_item is None:
@@ -966,7 +987,7 @@ class ChatTable:
 
                 updated = self._clean_null_bytes(updated)
                 updated, bounded_ids = bound_chat_with_changes(
-                    updated, droppable_files=await self._droppable_files(session, updated)
+                    updated, droppable_files=await self._droppable_files(session, updated, chat_item.user_id)
                 )
                 chat_item.chat = updated
                 chat_item.title = updated.get('title', 'New Chat')
@@ -1490,6 +1511,7 @@ class ChatTable:
 
         message = self._clean_null_bytes(message)
         message_id = self._clean_null_bytes(message_id)
+        await refresh_compaction_flag()
 
         try:
             async with self._chat_transaction(id) as (session, chat_item):
@@ -1504,7 +1526,9 @@ class ChatTable:
                 chat['history'] = history
                 # Keep the whole chat within its budget; the message being saved only gets its own bounds.
                 chat, changed = bound_chat_with_changes(
-                    chat, keep={message_id}, droppable_files=await self._droppable_files(session, chat)
+                    chat,
+                    keep={message_id},
+                    droppable_files=await self._droppable_files(session, chat, chat_item.user_id),
                 )
                 history = chat['history']
                 saved_message = history['messages'][message_id]

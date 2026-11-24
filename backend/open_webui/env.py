@@ -1213,10 +1213,11 @@ CHAT_SOURCE_DOCUMENT_MAX_CHARS = _int_env('CHAT_SOURCE_DOCUMENT_MAX_CHARS', 100_
 CHAT_MESSAGE_SOURCES_MAX_CHARS = _int_env('CHAT_MESSAGE_SOURCES_MAX_CHARS', 2_000_000)
 # A file attachment's copied text above this is dropped from the message; it stays in the file record.
 CHAT_INLINE_FILE_CONTENT_MAX_CHARS = _int_env('CHAT_INLINE_FILE_CONTENT_MAX_CHARS', 1_000_000)
-# Tool-result and citation characters kept in one whole chat. The newest messages of the current branch are
-# never shortened for this; copies the model no longer replays are shortened first, largest first.
+# Tool-result and citation characters kept in one whole chat. Recent work (everything written since the last
+# CHAT_BOUND_PROTECTED_TURNS prompts, and everything under the fork the user is working at) is protected first, as
+# far as this budget allows; replayed tool results never go below CHAT_TRIM_OLD_PREVIEW_CHARS.
 CHAT_STORED_BULK_MAX_CHARS = _int_env('CHAT_STORED_BULK_MAX_CHARS', 16_000_000)
-CHAT_BOUND_PROTECTED_MESSAGES = _int_env('CHAT_BOUND_PROTECTED_MESSAGES', 4)
+CHAT_BOUND_PROTECTED_TURNS = _int_env('CHAT_BOUND_PROTECTED_TURNS', 2)
 # A shortened text keeps at least this many characters (its start and end). When a chat is still over its budget
 # after that, its oldest copies are shortened further, oldest message first, to a short preview.
 CHAT_TRIM_PREVIEW_MIN_CHARS = _int_env('CHAT_TRIM_PREVIEW_MIN_CHARS', 20_000)
