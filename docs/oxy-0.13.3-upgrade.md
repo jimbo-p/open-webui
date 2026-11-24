@@ -63,49 +63,64 @@ in full):
    (preloaded `view_skill`, the manifests, `recall_memories`) are never
    changed.
 2. History is the one source of truth. The top-level `messages` list holds
-   the bounded history's copy of every message it names, so a tab posting
-   back the full copies it streamed cannot grow it. A citation source's own
-   copy of a file's, page's or search result's text (`source.file.data.content`,
+   the bounded history's copy of every message it names, so a tab posting back
+   the full copies it streamed cannot grow it. A citation source's own copy of
+   a file's, page's or search result's text (`source.file.data.content`,
    `source.docs[].content`) is never kept: nothing reads it there. An
    attachment's text over `CHAT_INLINE_FILE_CONTENT_MAX_CHARS` (1,000,000) is
    dropped, and the item marked `content_in_file_record`, only when a file
-   record of the chat's owner with that id holds text of the same length;
-   clones, forks and imports by another user keep their copy.
+   record of the chat's owner with that id holds text of the same length. From
+   then on the chat depends on that record, which production's chats did not:
+   if the owner deletes the file, later turns of the chat run without the
+   attachment, and a clone, fork or import by another user of a chat saved
+   after the deploy gets the item without text (it copies what the owner's
+   chat holds) and reads it through the share, so it loses the attachment once
+   the owner stops sharing. Chats saved before the deploy keep their copy
+   until the owner's next save.
 3. Recent work is protected whatever branch a save points at. Always: the
-   message being saved and replies that can still be running (unfinished and
-   newer than the newest prompt). An older unfinished reply, cut off by a
-   restart or the drain at a deploy, or left at an approval pause, stays
-   `done=False` in storage; it is not protected for that, and is ranked like
-   any other message. Then, up to three quarters of the budget and most
-   needed first: every reply at the fork the user is working at (the parent
-   of the newest prompt and of the newest message: the previous attempt,
-   other models' replies, and the answer to a prompt before it was edited),
-   the newest `CHAT_BOUND_PROTECTED_TURNS` (2) turns of the branches the model
-   replays, and the rest of the recent work (everything written since those
-   prompts and everything under those forks), newest first.
-4. One rule for notes: nothing on a branch the model replays ever goes below
-   `CHAT_TRIM_OLD_PREVIEW_CHARS` (2,000), including copies before a
+   message being saved and replies that can still be running: unfinished,
+   newer than the newest prompt, and not regenerated since (no reply to the
+   same prompt started more than a second later; several models' replies to
+   one prompt start together). A reply cut off by a restart or the drain at a
+   deploy, or left at an approval pause, stays `done=False` in storage; once a
+   newer prompt or a regeneration of it exists it is not protected for that,
+   and is ranked like any other message (a regenerated attempt as a reply at
+   the fork). Then, up to three quarters of the budget and most needed first:
+   every reply at the fork the user is working at (the parent of the newest
+   prompt and of the newest message: the previous attempt, other models'
+   replies, and the answer to a prompt before it was edited), the newest
+   `CHAT_BOUND_PROTECTED_TURNS` (2) turns of the branches the model replays,
+   and the rest of the recent work (everything written since those prompts and
+   everything under those forks), newest first.
+4. One rule for notes: nothing on a branch the model replays ever goes
+   below `CHAT_TRIM_OLD_PREVIEW_CHARS` (2,000), including copies before a
    compaction checkpoint (an edit or regenerate at or before it replays them
    again), and copies off those branches become notes only as the last step,
    while the chat is still over `CHAT_STORED_BULK_MAX_CHARS` (16,000,000).
-   Over the budget, in order: citation excerpts, then off-branch tool
-   results, each to stepped previews and then the short preview, toward three
-   quarters of the budget; then on-branch tool results (those before a
-   checkpoint first) only as far as needed: results not shortened before
-   toward 90% of the budget, already shortened ones again only as far as the
-   budget itself needs; then, if still over, off-branch previews and citation
-   excerpts to notes, oldest first. Per message, tool results keep
-   `CHAT_MESSAGE_TOOL_OUTPUT_MAX_CHARS` (8,000,000) together, the largest
-   first to a stepped preview of at least `CHAT_TRIM_PREVIEW_MIN_CHARS`
-   (20,000), then the oldest to the short preview; a citation excerpt keeps
-   `CHAT_SOURCE_DOCUMENT_MAX_CHARS` (100,000) and a message's excerpts
-   `CHAT_MESSAGE_SOURCES_MAX_CHARS` (2,000,000).
+   Over the budget, in order: citation excerpts, then off-branch tool results,
+   each to stepped previews and then the short preview, toward three quarters
+   of the budget; then on-branch tool results (those before a checkpoint
+   first), with one stepped cap for all of them, largest first, toward 90% of
+   the budget but never more than one step below what the budget itself needs,
+   so a newer result is never cut shorter than an older one, and the short
+   preview only as far as the budget needs; then, if still over, off-branch
+   previews and citation excerpts to notes, oldest first. Per message, tool
+   results keep `CHAT_MESSAGE_TOOL_OUTPUT_MAX_CHARS` (8,000,000) together, the
+   largest first to a stepped preview of at least
+   `CHAT_TRIM_PREVIEW_MIN_CHARS` (20,000), then the oldest to the short
+   preview; a citation excerpt keeps `CHAT_SOURCE_DOCUMENT_MAX_CHARS`
+   (100,000) and a message's excerpts `CHAT_MESSAGE_SOURCES_MAX_CHARS`
+   (2,000,000). A result the tool loop already capped at
+   `TOOL_RESULT_MAX_CHARS` (its first 4,000,000 characters plus its own note)
+   is kept as it is, and its note does not count against the message's limit.
 5. A shortened text keeps its start and end with a neutral note, counted
    from the original length, so the bounds are stable on their own output.
-   Caps are stepped (at most 1.5x apart), so steady growth does not
-   re-shorten the same results on every save. When a client posts back a
-   longer copy (full or an earlier preview) of a text the server had
-   shortened, `update_chat_by_id` keeps the stored copy.
+   Caps are stepped (at most 1.5x apart) and each cut aims below the budget,
+   so steady growth shortens the results that just left the protected turns
+   and re-shortens older ones only when the cap steps down (all of them
+   together). When a client posts back a longer copy (full or an earlier
+   preview) of a text the server had shortened, `update_chat_by_id` keeps the
+   stored copy.
 
 Where it runs: `ChatModel` bounds the chat it carries on every open, export
 and share (without the attachment check, which needs the database); save
@@ -125,34 +140,66 @@ nothing else, and `CHAT_STORAGE_BOUNDS=false` turns all of it off.
 
 Existing chats heal the next time they are saved. The first load of a chat
 saved before the bounds still costs what it did, so
-`python -m open_webui.utils.chat_bounds_repair` shrinks them ahead of time,
-and the shared-chat snapshots that copied them, with the app's decisions:
-compaction read from the config table, the same owner file check, and each
-`chat_message` row given the chat JSON's decision for its message. The dry
-run takes no row lock and writes nothing; `--sizes-only` lists sizes without
-reading chats. `--apply --backup-dir DIR` reads and plans in one REPEATABLE
-READ snapshot (which holds ACCESS SHARE on the tables: do not run it while a
-deploy that runs migrations is active or queued), streams the exact original
-bytes of what changes into a new backup (gzip level 1 plus a manifest with
-checksums, never replacing a file), then locks briefly to check nothing
-changed, writes, and commits as a separate step. A backup whose changes were
-not written is removed; when the commit outcome is unknown, the transaction's
-own status (`txid_status`) decides on a fresh connection, and the backup is
-kept unless the transaction was aborted. The tool never runs the app's
-migrations (`ENABLE_DB_MIGRATIONS` is forced off), creates the backup
+`python -m open_webui.utils.chat_bounds_repair` shrinks them ahead of time, and the
+shared-chat snapshots that copied them, with the app's decisions: compaction
+read from the config table, the same owner file check, and each `chat_message`
+row given the chat JSON's decision for its message. The dry run takes no row
+lock and writes nothing, but it reads each chat in the same REPEATABLE READ
+snapshot as `--apply`, which holds ACCESS SHARE on `chat` and `chat_message`
+while the chat is read and planned (tens of seconds for the largest chats). A
+schema migration waits for that and every chat query then waits behind the
+migration, so do not run the dry run or `--apply` while a deploy that runs
+migrations is active or queued. `--sizes-only` lists sizes without reading
+chats. `--apply --backup-dir DIR` reads and plans in that snapshot, streams
+the exact original bytes of what changes into a new backup (gzip level 1 plus
+a manifest with checksums, never replacing a file), then locks briefly to
+check nothing changed, writes, and commits as a separate step. A backup whose
+changes were not written is removed; when the commit outcome is unknown, the
+transaction's own status (`txid_status`) decides on a fresh connection, and
+the backup is kept unless the transaction was aborted. The tool never runs the
+app's migrations (`ENABLE_DB_MIGRATIONS` is forced off), creates the backup
 directory 0700 and every backup file 0600, and names a shared snapshot by a
-short hash of its share token in the log and in file names. Keep backups
-only for the verification period after `--apply`, then delete them; an
-attachment dropped by the repair is read from its file record afterwards, so
-that record must stay.
+short hash of its share token in the log and in file names. Keep backups only
+for the verification period after `--apply`, then delete them; an attachment
+dropped by the repair is read from its file record afterwards, so that record
+must stay.
 `--restore MANIFEST` stages the backup before locking, refuses (unless
 `--force`) when what the repair wrote has changed since, leaves the chat JSON
 alone for a rows-only repair, and does nothing when the chat is already as
-backed up. Failures are reported per chat, the run goes on, and the exit code
-is non-zero when any chat failed or changed. Peak memory is about 1.3x the
-larger of the chat and its rows on top of the interpreter, up to about 5x
-when its large results contain characters outside the Basic Multilingual
-Plane; never run it inside a serving task.
+backed up. Failures are reported per chat by error class only (a database
+error's text can quote the chat), the run goes on, and the exit code is
+non-zero when any chat failed or changed. If the database cannot be reached
+again after a chat (a writer failover), the run stops with the summary so
+far and the chats it did not check. A chat whose stored JSON holds a `\u0000`
+or lone-surrogate escape cannot be read by PostgreSQL's JSON functions; the
+dry run reports it FAILED (`UntranslatableCharacter`,
+`InvalidTextRepresentation` or `UnicodeEncodeError`), it is not repairable
+by this tool, and it heals when next saved.
+
+Run the repair against the Aurora writer endpoint itself, not the PgDog
+transaction pooler that the app's `DATABASE_URL` points at: the session
+settings it relies on (`lock_timeout`, `statement_timeout`) are not
+guaranteed through the pooler. Measured peak memory, as a multiple of the
+chat's uncompressed JSON on top of the interpreter: about 1.3x for a chat
+with the top-level messages list, 1.7x without it (branchy chats), and 5.3x
+and 6.6x when its large results contain characters outside the Basic
+Multilingual Plane. Run it as its own task with at least 7x the largest chat
+free (`--sizes-only` lists them), or leave larger chats to a bigger host with
+`--max-mb`; never run it inside a serving task.
+
+Known limits:
+
+- Native agent turns (Claude Code, Codex, Pi, ACP) keep a second copy of
+  every tool result in the `function_call` item's `native` field, and Codex a
+  third in `arguments`. Only `function_call_output` is bounded and counted,
+  so such chats can still grow past the budget. Production has no shared
+  terminal servers, so native agents run only through personal terminals;
+  bound or drop those copies before enabling them more widely.
+- A long-lived tab still posts the full tool results it streamed (history
+  plus the messages list) on every save. The server stores the bounded copy,
+  but each such request costs memory in proportion to what the tab holds
+  (about 365 MB per save after 60 turns of 3 x 1 MB results). Fixing it is a
+  frontend change.
 
 Regressions are in `test/backend/test_chat_bounds.py`, and the repair's in
 `test/backend/test_chat_bounds_repair_postgres.py` (run with

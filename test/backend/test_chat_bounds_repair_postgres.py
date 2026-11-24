@@ -213,13 +213,14 @@ def test_failures_are_reported_and_the_run_continues(small_limits, database, tmp
         def __init__(self, *args, **kwargs):
             calls.append(1)
             if len(calls) == 1:
-                raise RuntimeError('boom')
+                raise RuntimeError('CONTEXT: JSON data, line 1: ..."text": "what the user pasted')
             super().__init__(*args, **kwargs)
 
     monkeypatch.setattr(chat_bounds_repair, 'ChatPlan', FailOnce)
     assert run('--min-mb', '0', '--apply', '--backup-dir', str(tmp_path)) == 1
     out = capsys.readouterr().out
-    assert 'FAILED (RuntimeError: boom)' in out and '1 failed' in out and '1 shrunk' in out
+    assert 'FAILED (RuntimeError)' in out and '1 failed' in out and '1 shrunk' in out
+    assert 'pasted' not in out  # the error's text can quote the chat: only its class is printed
 
 
 def test_max_mb_leaves_larger_chats_alone(small_limits, database, tmp_path, capsys):
@@ -368,6 +369,26 @@ def test_an_unknown_commit_outcome_is_checked_before_the_backup_is_removed(
         assert code == 1 and manifests == [] and chat_text(database) == original
     else:  # still running when checked: the backup stays
         assert code == 1 and len(manifests) == 1
+
+
+def test_a_landed_chat_is_reported_and_the_run_summarised_when_the_database_cannot_be_reached_again(
+    small_limits, database, tmp_path, monkeypatch, capsys
+):
+    seed(database, 'big')
+    seed(database, 'other')
+    real_connect = chat_bounds_repair._connect
+    monkeypatch.setattr(chat_bounds_repair, '_connect', lambda: FlakyCommit(real_connect(), 'committed'))
+
+    def unreachable(connection):
+        raise ConnectionError('the writer is failing over')
+
+    monkeypatch.setattr(chat_bounds_repair, '_usable', unreachable)
+    assert run('--min-mb', '0', '--apply', '--backup-dir', str(tmp_path)) == 1
+    out = capsys.readouterr().out
+    assert 'shrunk (its commit reported an error but landed)' in out and 'FAILED' not in out
+    assert 'stopped: the database could not be reached again (ConnectionError)' in out
+    assert 'summary: 1 not checked, 1 shrunk' in out and 'not checked: ' in out
+    assert len(list(tmp_path.glob('*.manifest.json'))) == 1
 
 
 def test_an_unreadable_file_record_does_not_stop_the_repair(small_limits, database, tmp_path):

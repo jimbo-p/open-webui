@@ -9,8 +9,11 @@ replayed messages worked out from the chat JSON).
 
 Dry run by default: it lists the chats whose chat JSON or chat_message rows are stored above --min-mb (compressed, as
 PostgreSQL stores them), and the shared-chat snapshots above it (copied whole before the bounds, and never healed by
-the app), with their uncompressed sizes and the size after, by id only. It takes no row lock and writes nothing.
---sizes-only lists the sizes without reading the chats.
+the app), with their uncompressed sizes and the size after, by id only. It takes no row lock and writes nothing, but
+it reads each chat in the same snapshot as --apply, which holds ACCESS SHARE on chat and chat_message while the chat
+is read and planned (tens of seconds for the largest chats); a schema migration waits for that, and every chat query
+then waits behind the migration. Do not run the dry run or --apply while a deploy that runs migrations is active or
+queued. --sizes-only lists the sizes without reading the chats.
 
 --apply needs --backup-dir. For each chat that changes, the original chat JSON (when it changes) and the original
 columns of the rows that change are streamed, as the exact bytes PostgreSQL holds, into a new backup: a gzip data
@@ -20,9 +23,7 @@ locked only to check that it and
 the rows to change are as they were read, and to write them, then commits as a separate step. A chat that changed
 meanwhile is skipped, and a backup whose changes were not written is removed again; when the commit outcome is
 unknown, the transaction's status (txid_status) decides, and the backup is kept unless it was aborted. updated_at
-is left alone, so chat lists keep their order. Each chat's snapshot holds no row lock but does hold ACCESS SHARE on
-chat and chat_message, which a schema migration waits for: do not run this while a deploy that runs migrations is
-active or queued.
+is left alone, so chat lists keep their order. The snapshot's ACCESS SHARE (see the dry run) applies here too.
 --restore MANIFEST stages the backup first, then locks the chat only to check and write: it refuses, unless --force,
 when the chat or those rows changed after the repair (that would drop the newer work), and does nothing when the chat
 is already as backed up.
@@ -33,12 +34,18 @@ as the verification period after --apply, then delete them; after --apply an att
 from its file record, which therefore must stay.
 
 Memory: one chat at a time. The chat is read message by message and tool result by tool result, and the backup is
-streamed in slices, so the peak is about the parsed size of the chat or of its rows, whichever is larger (about 1.3x
-its uncompressed text, measured), on top of the interpreter. A text holding even one character outside the Basic
+streamed in slices. Measured peaks, as a multiple of the chat's uncompressed JSON: about 1.3x when the chat holds the
+top-level messages list, about 1.7x without it (branchy chats). A text holding even one character outside the Basic
 Multilingual Plane (an emoji, for example) is held by Python at 4 bytes per character, so a chat whose large results
-all contain one can need about 5x. Run it as its own task or on a host with at least 5x the largest chat free
-(--sizes-only lists them), never inside a serving Open WebUI task; --max-mb (uncompressed) leaves larger chats for a
-bigger host. It exits non-zero when any chat failed or changed while being repaired. Set DATABASE_URL to the writer:
+all contain one needs about 5.3x with the list and 6.6x without. Run it as its own task or on a host with at least 7x
+the largest chat free (--sizes-only lists them), never inside a serving Open WebUI task; --max-mb (uncompressed)
+leaves larger chats for a bigger host. It exits non-zero when any chat failed or changed while being repaired, or the
+database could not be reached again. A FAILED line names the error's class only, never its text (a database error
+can quote the chat it was reading).
+
+Set DATABASE_URL to the Aurora writer endpoint itself, not the PgDog pooler the app's own DATABASE_URL points at: the
+session settings this sets on its connection (lock_timeout, statement_timeout) are not guaranteed through a
+transaction pooler.
 
     python -m open_webui.utils.chat_bounds_repair --min-mb 8 --sizes-only
     python -m open_webui.utils.chat_bounds_repair --min-mb 8
@@ -156,6 +163,7 @@ class ChatPlan:
         # The layout the app's own bounds use: worked out on the per-message-bounded copies.
         bounded_view = {key: bound_message(message, self.droppable_files) for key, message in messages.items()}
         self.layout = chat_layout(bounded_view, self.current_id)
+        del bounded_view  # the chat pass below builds its own bounded copies
         bounded, changed = bound_chat_with_changes(chat, droppable_files=self.droppable_files)
         self.bounded_chat = None if bounded is chat else bounded
         self.fingerprints = {
@@ -827,8 +835,12 @@ def _usable(connection):
 
 
 def _attempt(connection, args, table: str, chat_id: str, run_id: str):
-    """Size, check and repair one chat; any error is reported and counted, and the next chat is still tried."""
+    """Size, check and repair one chat; any error is reported and counted, and the next chat is still tried.
+
+    Returns the connection for the next chat (None when the database could not be reached again) and the outcome.
+    """
     name = label(table, chat_id)
+    outcome = 'failed'
     try:
         chat_stored, rows_stored = args.stored[(table, chat_id)]
         chat_raw, rows_raw = _raw_sizes(connection, table, chat_id)
@@ -843,14 +855,18 @@ def _attempt(connection, args, table: str, chat_id: str, run_id: str):
         if args.sizes_only:
             return connection, 'listed'
         outcome = _repair_one(connection, args, table, chat_id, run_id)
-        return _usable(connection), outcome
     except Exception as error:
         try:
             connection.rollback()
         except Exception:
             pass
-        print(f'{name}: FAILED ({type(error).__name__}: {error})', flush=True)
-        return _usable(connection), 'failed'
+        # The class only: a database error's text can quote the chat it was reading.
+        print(f'{name}: FAILED ({type(error).__name__})', flush=True)
+    try:
+        return _usable(connection), outcome
+    except Exception as error:
+        print(f'stopped: the database could not be reached again ({type(error).__name__})', flush=True)
+        return None, outcome
 
 
 def repair(args) -> int:
@@ -871,15 +887,20 @@ def repair(args) -> int:
     args.stored = {
         (table, chat_id): (chat_stored, rows_stored) for table, chat_id, chat_stored, rows_stored in candidates
     }
-    for table, chat_id, _, _ in candidates:
+    for index, (table, chat_id, _, _) in enumerate(candidates):
         connection, outcome = _attempt(connection, args, table, chat_id, run_id)
         outcomes.setdefault(outcome, []).append(label(table, chat_id))
+        if connection is None:
+            rest = [label(*candidate[:2]) for candidate in candidates[index + 1 :]]
+            if rest:
+                outcomes['not checked'] = rest
+            break
     summary = ', '.join(f'{len(ids)} {name}' for name, ids in sorted(outcomes.items())) or 'nothing to do'
     print(f'summary: {summary}', flush=True)
-    for name in ('failed', 'changed', 'above --max-mb'):
+    for name in ('failed', 'changed', 'above --max-mb', 'not checked'):
         if outcomes.get(name):
             print(f'{name}: {" ".join(outcomes[name])}', flush=True)
-    return 1 if outcomes.get('failed') or outcomes.get('changed') else 0
+    return 1 if connection is None or outcomes.get('failed') or outcomes.get('changed') else 0
 
 
 # ---------------------------------------------------------------------------------------------------------------------
