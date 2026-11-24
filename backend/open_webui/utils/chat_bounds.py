@@ -7,22 +7,27 @@ A chat is loaded and saved whole on every turn and every open, so one ~900 MB ch
    (preloaded skills, manifests, recalled memories) are never changed.
 2. History is the one source of truth. The top-level ``messages`` list holds the bounded history's copy of every
    message it names, and a citation's copy of a file or page (which nothing reads) is not kept. An attachment's text
-   is dropped only when a file record of the chat's owner holds the same text.
+   is dropped only when a file record of the chat's owner holds the same text (the chat then reads it from there).
 3. Recent work is protected whatever branch a save points at. Always: the message being saved and replies that can
-   still be running (unfinished and newer than the newest prompt; an older unfinished reply, cut off by a restart or
-   left at an approval pause, is ranked like any other message). Then, up to the watermark share of the budget and
-   most needed first: every reply at the fork the user is working at (the parent of the newest prompt and of the
-   newest message: the previous attempt, other models' replies, the answer to a prompt before it was edited), the
-   newest turns of the branches the model replays, and the rest of the recent work (everything written since the
-   last few prompts, and everything under those forks), newest first.
+   still be running (unfinished, newer than the newest prompt, and not regenerated since; an unfinished reply cut off
+   by a restart or left at an approval pause is ranked like any other message once a newer prompt or a later reply
+   to its prompt exists). Then, up to the watermark share of the budget and most needed first: every reply at the
+   fork the user is working at (the parent of the newest prompt and of the newest message: the previous attempt,
+   other models' replies, the answer to a prompt before it was edited), the newest turns of the branches the model
+   replays, and the rest of the recent work (everything written since the last few prompts, and everything under
+   those forks), newest first.
 4. Over the budget, one rule for notes: nothing on a branch the model replays ever goes below a short preview, even
    if the chat then stays over budget, and copies off those branches become notes only as the last step, while the
    chat is still over the budget. The order: citation excerpts (never read by the model) and then off-branch tool
-   results, down toward the watermark; then on-branch tool results (those before a compaction checkpoint first) only
-   as far as the budget needs; then, if still over, off-branch previews and citation excerpts to notes.
+   results, down toward the watermark; then on-branch tool results (those before a compaction checkpoint first), once
+   the chat is over the budget, with one cap for all of them (never more than one step below what the budget itself
+   needs), so a newer result is never cut shorter than an older one; then, if still over, off-branch previews and
+   citation excerpts to notes.
 5. A shortened text keeps its start and end and says how much was removed, counted from the original length, so the
-   bounds are stable on their own output. Caps are stepped (at most 1.5x apart), and unread copies are brought down
-   toward a watermark, so steady growth does not re-shorten on every save.
+   bounds are stable on their own output. Caps are stepped (at most 1.5x apart) and each cut aims below the budget
+   (unread copies toward the watermark, replayed ones toward 90% of it), so steady growth shortens the results that
+   just left the protected turns and re-shortens older ones only when the cap steps down. A result the tool loop
+   already capped at TOOL_RESULT_MAX_CHARS, with its own note, is not cut again.
 
 Inputs are never modified: a message that needs bounding is copied first, because callers such as the tool loop
 keep using their live objects for the model.
@@ -64,10 +69,16 @@ KEPT_CALL_NAMES = frozenset({'ask_user'})
 STEP_MULTIPLES = (1, 1.5, 2, 3, 4, 5, 7.5, 10, 15, 20, 30, 40, 50, 75, 100, 150, 200)
 # Copies the model never reads are brought down toward this share of the budget, and recent work may take it.
 WATERMARK = 0.75
-# Copies the model replays are brought down toward this share, by cutting texts not shortened before; texts already
-# shortened are cut again only as far as the budget itself needs. That leaves room for the next turns without
-# re-cutting the same results on every save.
+# Once the chat is over the budget, copies the model replays are brought down toward this share with one stepped cap
+# for all of them, largest first, but never more than one step below what the budget itself needs. That leaves room
+# for the next turns, and older copies are cut again only when the cap steps down.
 REPLAYED_TARGET = 0.9
+# The tool loop keeps the first TOOL_RESULT_MAX_CHARS characters of a larger result and appends its own short note
+# (about 150 characters); a text over the per-result cap by no more than this is that output, and is not cut again.
+CAPPED_RESULT_NOTE_ROOM = 300
+# Replies of several models to one prompt are created together, at most this many seconds apart; a later reply to the
+# same prompt is a regeneration.
+SAME_START_SECONDS = 1
 # A file's copied text dropped from a message is marked, so a reader knows to use the file record.
 OMITTED_MARK = 'content_in_file_record'
 
@@ -163,6 +174,12 @@ def _step_down(cap: int, floor: int) -> int:
     if cap >= steps[-1]:
         return cap // steps[-1] * steps[-1]
     return max(step for step in steps if step <= cap)
+
+
+def _stepped_cap(lengths: list[int], budget: int, floor: int) -> int | None:
+    """The stepped cap that fits ``lengths`` into ``budget`` (never below ``floor``); None when they already fit."""
+    cap = _cap_for(lengths, max(budget, 0))
+    return None if cap is None else _step_down(max(cap, floor), floor)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -302,12 +319,16 @@ def _fit_group(capped: list[int], budget: int, limits: SimpleNamespace) -> list[
 
 def _message_targets(slots: list[tuple[str, tuple, int]], limits: SimpleNamespace) -> dict[tuple, tuple[str, int]]:
     targets = {}
-    for kind, per_item, budget in (
-        ('tool', limits.tool_result, limits.message_tool),
-        ('source', limits.source_document, limits.message_sources),
+    for kind, per_item, budget, room in (
+        ('tool', limits.tool_result, limits.message_tool, CAPPED_RESULT_NOTE_ROOM),
+        ('source', limits.source_document, limits.message_sources, 0),
     ):
         group = [(path, length) for slot_kind, path, length in slots if slot_kind == kind]
-        values = _fit_group([min(length, per_item) for _, length in group], budget, limits)
+        # A result the tool loop already capped (its cap plus its own note) is kept, and its note does not count
+        # against the message's budget.
+        capped = [length if length <= per_item + room else per_item for _, length in group]
+        noted = sum(1 for length in capped if length > per_item)
+        values = _fit_group(capped, budget + room * noted, limits)
         for (path, length), target in zip(group, values):
             if target < length:
                 targets[path] = (kind, target)
@@ -460,15 +481,26 @@ def _recent(view: dict, children: dict, by_age: list[str], turns: int) -> set[st
 
 
 def _running(view: dict, by_age: list[str], keep) -> set[str]:
-    """The message being saved, and replies that can still be running: unfinished and newer than the newest prompt.
+    """The message being saved, and replies that can still be running: unfinished, newer than the newest prompt, and
+    not regenerated since (no reply to the same prompt started later; several models' replies start together).
 
-    An older unfinished reply (cut off by a restart, or left at an approval pause) is not running any more; it is
-    ranked like any other message.
+    An unfinished reply cut off by a restart, or left at an approval pause, is not running any more once a newer
+    prompt or a regeneration of it exists; it is ranked like any other message.
     """
     prompts = [key for key in by_age if view[key].get('role') == 'user']
     newest_prompt = _stamp(view, prompts[-1]) if prompts else float('-inf')
+    newest_reply: dict = {}
+    for key in view:
+        parent = view[key].get('parentId')
+        newest_reply[parent] = max(newest_reply.get(parent, float('-inf')), _stamp(view, key))
     running = {key for key in keep if key in view}
-    running |= {key for key in view if view[key].get('done') is False and _stamp(view, key) >= newest_prompt}
+    running |= {
+        key
+        for key in view
+        if view[key].get('done') is False
+        and _stamp(view, key) >= newest_prompt
+        and newest_reply[view[key].get('parentId')] <= _stamp(view, key) + SAME_START_SECONDS
+    }
     return running
 
 
@@ -546,9 +578,9 @@ class _Fit:
         self.slots[key] = _slots(self.view[key])
         self.total -= before - sum(length for _, _, length in self.slots[key])
 
-    def _cap(self, groups: list, target: int, fresh_only: bool) -> None:
+    def _cap(self, groups: list, target: int, fresh_only: bool, start: int | None = None) -> None:
         """One stepped cap, largest first, toward ``target``, on the texts of ``groups`` (only those not shortened
-        before, if ``fresh_only``)."""
+        before, if ``fresh_only``); with ``start``, never more than one step below the cap ``start`` itself needs."""
         texts = [
             (group, path, length)
             for group in groups
@@ -558,10 +590,16 @@ class _Fit:
         if not texts or self.total <= target:
             return
         lengths = [length for _, _, length in texts]
-        cap = _cap_for(lengths, max(target - (self.total - sum(lengths)), 0))
+        other = self.total - sum(lengths)
+        floor = self.limits.floor
+        cap = _stepped_cap(lengths, target - other, floor)
         if cap is None:
             return
-        cap = _step_down(max(cap, self.limits.floor), self.limits.floor)
+        needed = _stepped_cap(lengths, start - other, floor) if start is not None else None
+        if needed is not None:
+            # When the rest of the chat leaves little room, aiming below the budget would cut far deeper than it
+            # needs; one step below what it needs still leaves room for the next turns.
+            cap = max(cap, _step_down(needed - 1, floor))
         chosen: dict[tuple, set] = {}
         for group, path, length in texts:
             if length > cap:
@@ -577,17 +615,19 @@ class _Fit:
         self.slots[key] = _slots(self.view[key])
         self.total -= before - sum(length for _, _, length in self.slots[key])
 
-    def previews(self, groups: list, target: int, recut_target: int | None = None) -> None:
-        """Bring ``groups`` (oldest first) down: a stepped preview cap on texts not shortened before, toward
-        ``target``; then, while over ``recut_target`` (default ``target``), a stepped cap on all of them; then,
-        while still over it, oldest first to the short preview. Never below the short preview."""
-        recut_target = target if recut_target is None else recut_target
-        if not groups or self.total <= recut_target:
+    def previews(self, groups: list, target: int, start: int | None = None, fresh_first: bool = False) -> None:
+        """When the chat is over ``start`` (default ``target``), bring ``groups`` (oldest first) down toward
+        ``target``: one stepped cap, largest first, on all their texts (after one on the texts not shortened before,
+        if ``fresh_first``), never more than one step below what ``start`` needs; then, while still over ``start``,
+        oldest first to the short preview. Never below the short preview."""
+        start = target if start is None else start
+        if not groups or self.total <= start:
             return
-        self._cap(groups, target, fresh_only=True)
-        self._cap(groups, recut_target, fresh_only=False)
+        if fresh_first:
+            self._cap(groups, target, fresh_only=True)
+        self._cap(groups, target, fresh_only=False, start=None if start == target else start)
         for group in groups:
-            if self.total <= recut_target:
+            if self.total <= start:
                 return
             self._shorten(group, self.limits.old_preview, self.limits.old_preview)
 
@@ -614,13 +654,15 @@ def _fit_chat(view: dict, slots: dict, layout: Layout, limits: SimpleNamespace, 
     before_checkpoint = [(key, 'tool') for key in order if key in layout.branch and key not in layout.replayed]
     replayed = [(key, 'tool') for key in order if key in layout.replayed]
     watermark = int(limits.chat_bulk * WATERMARK)
-    # What the model never reads goes first, down toward the watermark (room for the next turns).
-    fit.previews(citations, watermark)
-    fit.previews(off_branch, watermark)
-    # What it reads on a branch: fresh results toward REPLAYED_TARGET, shortened ones only as far as the budget needs.
+    # What the model never reads goes first, down toward the watermark (room for the next turns); copies not shortened
+    # before first, so older previews are not rewritten on every save.
+    fit.previews(citations, watermark, fresh_first=True)
+    fit.previews(off_branch, watermark, fresh_first=True)
+    # What it reads on a branch, once the chat is over the budget: one cap for all of it toward REPLAYED_TARGET, so a
+    # newer result is never shorter than an older one; the short preview only as far as the budget needs.
     replayed_target = int(limits.chat_bulk * REPLAYED_TARGET)
-    fit.previews(before_checkpoint, replayed_target, limits.chat_bulk)
-    fit.previews(replayed, replayed_target, limits.chat_bulk)
+    fit.previews(before_checkpoint, replayed_target, start=limits.chat_bulk)
+    fit.previews(replayed, replayed_target, start=limits.chat_bulk)
     fit.notes(citations + off_branch, limits.chat_bulk)
 
 

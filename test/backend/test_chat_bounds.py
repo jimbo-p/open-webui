@@ -320,20 +320,59 @@ def test_a_chat_that_fits_after_short_previews_keeps_its_newer_results_whole(sma
     assert all(bounded[f'a{index}'] is messages[f'a{index}'] for index in range(2, 6))
 
 
-def test_steady_growth_does_not_reshorten_the_chat_on_every_save(small_limits):
+def grow(messages, turn, sizes, **extra):
+    """``messages`` with one more turn (prompt and reply) on the single branch."""
+    messages, parent = dict(messages), (f'a{turn - 1}' if turn else None)
+    if parent:
+        messages[parent] = {**messages[parent], 'childrenIds': [f'u{turn}']}
+    messages[f'u{turn}'] = {
+        'id': f'u{turn}',
+        'parentId': parent,
+        'childrenIds': [f'a{turn}'],
+        'role': 'user',
+        'timestamp': 2 * turn + 1,
+    }
+    messages[f'a{turn}'] = tool_message(f'a{turn}', sizes, parent=f'u{turn}', timestamp=2 * turn + 2, **extra)
+    return messages
+
+
+def grow_and_check(turns, sizes, budget):
+    """Save a growing chat once per turn (as the reply's final save does) and check every save: within the budget,
+    a newer reply's results never shorter than an older one's, and a result cut again only by a real step down.
+    Returns how many older replies each save rewrote."""
+    messages, rewrites = {}, []
+    for turn in range(turns):
+        messages = grow(messages, turn, sizes)
+        before = {key: output_texts(message) for key, message in messages.items()}
+        messages, changed = bound_messages_map(messages, f'a{turn}', keep={f'a{turn}'})
+        assert bulk(messages) <= budget
+        lengths = [len(output_texts(messages[f'a{index}'])[0]) for index in range(turn + 1)]
+        assert lengths == sorted(lengths), lengths
+        for key in changed - {f'a{turn}'}:
+            for old, new in zip(before[key], output_texts(messages[key])):
+                if chat_bounds.has_bound_note(old) and new != old:
+                    assert len(new) <= len(old) * 0.8
+        rewrites.append(len(changed - {f'a{turn}'}))
+    return messages, rewrites
+
+
+def test_steady_growth_cuts_the_results_leaving_protection_and_re_cuts_older_ones_only_by_steps(small_limits):
     messages = chain(4, [3_500])
     bounded, changed = bound_messages_map(messages, 'a3')
     assert changed and bulk(bounded) <= 10_000
-    grown = copy.deepcopy(bounded)
-    grown['a3']['childrenIds'] = ['u4']
-    grown['u4'] = {'id': 'u4', 'parentId': 'a3', 'childrenIds': ['a4'], 'role': 'user', 'timestamp': 9}
-    grown['a4'] = tool_message('a4', [100], parent='u4', timestamp=10)
+    grown = grow(bounded, 4, [100])
     assert bound_messages_map(grown, 'a4') == (grown, set())  # still under the budget: nothing is rewritten
-    grown['a4'] = tool_message('a4', [3_500], parent='u4', timestamp=10)
-    regrown, changed = bound_messages_map(grown, 'a4')
-    assert changed == {'a3'}  # only the result not shortened before; the others are cut again only if needed
-    assert all(regrown[key] is grown[key] for key in ('a0', 'a1', 'a2'))
-    assert 'of 3,507 characters' in output_texts(regrown['a0'])[0]
+    _, rewrites = grow_and_check(10, [1_800], 10_000)
+    assert sum(rewrites) <= 2 * 10  # older results are cut again only when the cap steps down
+
+
+def test_long_growth_at_default_limits_never_leaves_a_newer_result_shorter_than_an_older_one(monkeypatch):
+    monkeypatch.setitem(chat_bounds._compaction, 'enabled', False)
+    messages, rewrites = grow_and_check(20, [1_000_000] * 3, env.CHAT_STORED_BULK_MAX_CHARS)
+    lengths = [len(output_texts(messages[f'a{turn}'])[0]) for turn in range(20)]
+    assert lengths[-2:] == [1_000_000 + 7] * 2  # the newest two turns stay whole
+    assert min(lengths) >= 100_000  # an even cut, not a floor for the turns that just left protection
+    assert max(rewrites) <= 20
 
 
 def test_a_reply_still_being_written_and_the_message_being_saved_keep_their_results(small_limits):
@@ -879,3 +918,70 @@ async def test_an_unreadable_file_record_never_makes_a_chat_unsavable(small_limi
     chat, _ = await stored(chat_db)
     assert chat['title'] == 'Renamed'
     assert chat['history']['messages']['u0']['files'][0]['file']['data']['content'] == 'x' * 900
+
+
+# Round-5 scenarios
+
+
+def regenerated_after_interruption(dead_done, dead_sizes):
+    """30 turns (2 x 150,000 each), a checkpoint on u26, and the newest prompt's reply r0 (``dead_sizes``) cut off
+    and left stored with ``done=dead_done``; the user regenerated it and r1 (2 x 4,000,000) finished later."""
+    messages = chain(30, [150_000] * 2)
+    messages['u26']['contextSummary'] = 'Earlier turns, summarized.'
+    messages['a29']['childrenIds'] = ['u30']
+    messages['u30'] = {'id': 'u30', 'parentId': 'a29', 'childrenIds': ['r0', 'r1'], 'role': 'user', 'timestamp': 61}
+    messages['r0'] = tool_message('r0', dead_sizes, parent='u30', timestamp=62, done=dead_done)
+    messages['r1'] = tool_message('r1', [4_000_000] * 2, parent='u30', timestamp=400)
+    return messages
+
+
+def test_a_reply_cut_off_and_then_regenerated_is_ranked_as_a_reply_at_the_fork(monkeypatch):
+    monkeypatch.setitem(chat_bounds._compaction, 'enabled', True)
+    messages = regenerated_after_interruption(False, [4_000_000] * 2)
+    assert 'r0' not in chat_bounds._running(messages, sorted(messages, key=lambda key: messages[key]['timestamp']), ())
+    for keep in ({'r1'}, ()):  # the new reply's final save, then the tab's save
+        bounded, _ = bound_messages_map(messages, 'r1', keep=keep)
+        assert bounded['r1'] is messages['r1']  # the answer the user is on keeps its results
+        for key in ('a26', 'a27', 'a28', 'a29'):  # what the model reads after the checkpoint
+            assert bounded[key] is messages[key]
+        assert bulk({'r0': bounded['r0']}) < 8_000_000  # the dead attempt is no longer kept whole
+        finished, _ = bound_messages_map(regenerated_after_interruption(True, [4_000_000] * 2), 'r1', keep=keep)
+        assert {key: output_texts(value) for key, value in bounded.items()} == {
+            key: output_texts(value) for key, value in finished.items()
+        }  # exactly as if it had finished
+    smaller = regenerated_after_interruption(False, [1_000_000] * 2)
+    bounded, changed = bound_messages_map(smaller, 'r1')
+    assert changed and bounded['r0'] is smaller['r0']  # ranked as a reply at the fork, it fits and is kept
+
+
+def test_replies_of_several_models_started_together_stay_running(small_limits):
+    messages = chain(4, [1_500])
+    messages['u3']['childrenIds'] = ['a3', 'm3']
+    messages['a3'] = tool_message('a3', [3_000, 1_000], parent='u3', timestamp=8, done=False)  # still streaming
+    messages['m3'] = tool_message('m3', [3_000, 1_000], parent='u3', timestamp=9)  # the other model, saved now
+    bounded, _ = bound_messages_map(messages, 'm3', keep={'m3'})
+    assert bounded['a3'] is messages['a3'] and bounded['m3'] is messages['m3']
+    messages['m3']['timestamp'] = 30  # a regeneration, started long after a3 stopped
+    regenerated, _ = bound_messages_map(messages, 'm3', keep={'m3'})
+    assert regenerated['a3'] is not messages['a3']
+
+
+@pytest.mark.asyncio
+async def test_a_result_the_tool_loop_already_capped_is_not_cut_again(small_limits, monkeypatch):
+    monkeypatch.setattr(middleware, 'TOOL_RESULT_MAX_CHARS', env.TOOL_RESULT_MAX_CHARS)
+    monkeypatch.setattr(env, 'CHAT_MESSAGE_TOOL_OUTPUT_MAX_CHARS', 2 * env.TOOL_RESULT_MAX_CHARS)
+    capped, _, _ = await middleware.process_tool_result(None, 'query_rows', 'q' * 6_000, 'external')
+    assert len(capped) > env.TOOL_RESULT_MAX_CHARS  # its own note comes after the kept characters
+
+    def with_results(count):
+        message = tool_message('a', [0] * count)
+        for item in message['output']:
+            if item['type'] == 'function_call_output':
+                item['output'][0]['text'] = capped
+        return message
+
+    one, two, three = with_results(1), with_results(2), with_results(3)
+    assert bound_message(one) is one
+    assert bound_message(two) is two  # two capped results fill the message's limit, their notes included
+    assert bound_message(three) is not three  # over it: cut as before
+    assert len(output_texts(bound_message(tool_message('b', [4_400])))[0]) <= env.TOOL_RESULT_MAX_CHARS
