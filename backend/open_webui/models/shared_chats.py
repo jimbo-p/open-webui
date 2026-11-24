@@ -4,6 +4,7 @@ import uuid
 from typing import Literal, Optional
 
 from open_webui.internal.db import Base, JSONField, get_async_db_context
+from open_webui.utils.chat_bounds import bound_chat
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import JSON, BigInteger, Column, ForeignKey, Text, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -83,7 +84,7 @@ class SharedChatsTable:
                 chat_id=chat_id,
                 user_id=user_id,
                 title=chat.title,
-                chat={**chat.chat, 'share_mode': share_mode},
+                chat={**bound_chat(chat.chat), 'share_mode': share_mode},
                 created_at=now,
                 updated_at=now,
             )
@@ -112,7 +113,7 @@ class SharedChatsTable:
 
             shared_chat.title = chat.title
             shared_chat.chat = {
-                **chat.chat,
+                **bound_chat(chat.chat),
                 'share_mode': shared_chat.chat.get('share_mode'),
                 **(form_data.model_dump(exclude_unset=True) if form_data else {}),
             }
@@ -131,7 +132,7 @@ class SharedChatsTable:
 
                     chat = await db.get(Chat, shared.chat_id)
                     if chat:
-                        shared.chat = chat.chat
+                        shared.chat = bound_chat(chat.chat)
                         shared.title = chat.title
                 shared.chat = {**shared.chat, 'share_mode': share_mode}
                 await db.commit()
