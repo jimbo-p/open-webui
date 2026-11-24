@@ -25,11 +25,10 @@ from open_webui.utils.chat_bounds import (
     bound_chat,
     bound_chat_with_changes,
     bound_message,
-    bound_messages_map,
     bounded_fields,
 )
 from open_webui.utils.misc import get_output_text, sanitize_data_for_db, sanitize_text_for_db
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
 from sqlalchemy import (
     JSON,
     BigInteger,
@@ -276,9 +275,12 @@ class ChatModel(BaseModel):
 
     @field_validator('chat')
     @classmethod
-    def bound_saved_chat(cls, value):
+    def bound_saved_chat(cls, value, info: ValidationInfo):
         # Every load, save, export and share goes through this model, so an oversized chat is served (and saved
-        # back by the frontend) within the saved-chat bounds instead of being copied whole again.
+        # back by the frontend) within the saved-chat bounds instead of being copied whole again. Save paths that
+        # have just bounded the chat they store pass context={'bounded': True}.
+        if info.context and info.context.get('bounded'):
+            return value
         return bound_chat(value)
 
 
@@ -361,11 +363,6 @@ class ChatResponse(BaseModel):
     @classmethod
     def normalize_variables(cls, value):
         return value if isinstance(value, dict) else {}
-
-    @field_validator('chat')
-    @classmethod
-    def bound_saved_chat(cls, value):
-        return bound_chat(value)
 
 
 class ChatTitleIdResponse(BaseModel):
@@ -508,15 +505,39 @@ class ChatTable:
                 message_id, chat_id, message.get('user_id') or chat.user_id, message, db=session
             )
 
+    async def _write_updated_rows(self, session, chat_item, stored: dict, incoming: dict, bounded_ids: set) -> None:
+        """After update_chat_by_id: write the messages the caller sent that changed, and the bounded columns of
+        older messages the chat budget shortened (a chat without history has neither)."""
+        history_messages = (chat_item.chat.get('history') or {}).get('messages') or {}
+        stored_messages = (stored.get('history') or {}).get('messages') or {}
+        incoming_ids = set((incoming.get('history') or {}).get('messages') or {})
+        for mid in incoming_ids:
+            message = history_messages.get(mid)
+            if message and message.get('role') and message != stored_messages.get(mid):
+                await ChatMessages.upsert_message(
+                    mid, chat_item.id, message.get('user_id') or chat_item.user_id, message, db=session
+                )
+        if bounded_ids - incoming_ids:
+            await self._sync_bounded_rows(
+                session, chat_item.id, chat_item.user_id, history_messages, bounded_ids - incoming_ids
+            )
+
     @staticmethod
     async def _sync_bounded_rows(session, chat_id: str, owner_id: str, messages: dict, message_ids: set[str]) -> None:
-        """Write the bounded columns of messages shortened for the chat budget to their chat_message rows."""
+        """Write the bounded columns of messages shortened for the chat budget to their existing chat_message rows.
+
+        A message without a row is left alone: a partial row would replay as a parentless user turn and hide the
+        gap from the backfill, which later writes the whole (bounded) message from the chat.
+        """
         for message_id in message_ids:
             message = messages.get(message_id)
-            if isinstance(message, dict) and message.get('role'):
-                await ChatMessages.upsert_message(
-                    message_id, chat_id, message.get('user_id') or owner_id, bounded_fields(message), db=session
-                )
+            if not isinstance(message, dict) or not message.get('role'):
+                continue
+            if await session.get(ChatMessage, f'{chat_id}-{message_id}') is None:
+                continue
+            await ChatMessages.upsert_message(
+                message_id, chat_id, message.get('user_id') or owner_id, bounded_fields(message), db=session
+            )
 
     def _clean_null_bytes(self, obj):
         """Recursively remove null bytes from strings in dict/list structures."""
@@ -720,14 +741,15 @@ class ChatTable:
             session.add(chat_item)
             await session.commit()
 
-            # Dual-write initial messages to chat_message table
+            # Dual-write initial messages to chat_message table, from the bounded chat that was stored
             try:
-                history = form_data.chat.get('history') if isinstance(form_data.chat.get('history'), dict) else {}
+                stored = chat.chat or {}
+                history = stored.get('history') if isinstance(stored.get('history'), dict) else {}
                 messages = history.get('messages') if isinstance(history.get('messages'), dict) else {}
-                if not messages and isinstance(form_data.chat.get('messages'), list):
+                if not messages and isinstance(stored.get('messages'), list):
                     messages = {
                         message.get('id'): message
-                        for message in form_data.chat['messages']
+                        for message in stored['messages']
                         if isinstance(message, dict) and message.get('id')
                     }
                 for message_id, message in messages.items():
@@ -852,14 +874,15 @@ class ChatTable:
             session.add_all(chats)
             await session.commit()
 
-            # Dual-write messages to chat_message table
-            for form_data, imported_chat in zip(chat_import_forms, chats):
-                history = form_data.chat.get('history') if isinstance(form_data.chat.get('history'), dict) else {}
+            # Dual-write messages to chat_message table, from the bounded chats that were stored
+            for imported_chat in chats:
+                stored = imported_chat.chat or {}
+                history = stored.get('history') if isinstance(stored.get('history'), dict) else {}
                 messages = history.get('messages') if isinstance(history.get('messages'), dict) else {}
-                if not messages and isinstance(form_data.chat.get('messages'), list):
+                if not messages and isinstance(stored.get('messages'), list):
                     messages = {
                         message.get('id'): message
-                        for message in form_data.chat['messages']
+                        for message in stored['messages']
                         if isinstance(message, dict) and message.get('id')
                     }
                 for message_id, message in messages.items():
@@ -918,21 +941,8 @@ class ChatTable:
                 if touch:
                     chat_item.updated_at = int(time.time())
 
-                incoming_ids = set(chat.get('history', {}).get('messages') or {})
-                for mid in incoming_ids:
-                    message = updated['history']['messages'].get(mid)
-                    if (
-                        message
-                        and message.get('role')
-                        and message != (stored.get('history', {}).get('messages') or {}).get(mid)
-                    ):
-                        await ChatMessages.upsert_message(
-                            mid, id, message.get('user_id') or chat_item.user_id, message, db=session
-                        )
-                await self._sync_bounded_rows(
-                    session, id, chat_item.user_id, updated['history']['messages'], bounded_ids - incoming_ids
-                )
-                return ChatModel.model_validate(chat_item)
+                await self._write_updated_rows(session, chat_item, stored, chat, bounded_ids)
+                return ChatModel.model_validate(chat_item, context={'bounded': True})
         except Exception:
             return
 
@@ -1456,18 +1466,18 @@ class ChatTable:
 
                 history = chat.get('history', {})
                 self.upsert_message_to_history(history, message_id, bound_message(message))
+                chat['history'] = history
                 # Keep the whole chat within its budget; the message being saved only gets its own bounds.
-                history['messages'], changed = bound_messages_map(
-                    history.get('messages') or {}, history.get('currentId') or message_id, keep={message_id}
-                )
+                chat, changed = bound_chat_with_changes(chat, keep={message_id})
+                history = chat['history']
                 saved_message = history['messages'][message_id]
                 await ChatMessages.upsert_message(
                     message_id, id, saved_message.get('user_id') or chat_item.user_id, saved_message, db=session
                 )
-                await self._sync_bounded_rows(
-                    session, id, chat_item.user_id, history['messages'], changed - {message_id}
-                )
-                chat['history'] = history
+                if changed - {message_id}:
+                    await self._sync_bounded_rows(
+                        session, id, chat_item.user_id, history['messages'], changed - {message_id}
+                    )
                 chat_item.chat = chat  # chat is a fresh dict when the column was empty
                 chat_item.title = self._clean_null_bytes(chat.get('title', 'New Chat'))
                 chat_item.current_message_id = self.get_current_message_id(chat)
@@ -1476,7 +1486,7 @@ class ChatTable:
                 if touch:
                     chat_item.updated_at = int(time.time())
 
-                updated_chat = ChatModel.model_validate(chat_item)
+                updated_chat = ChatModel.model_validate(chat_item, context={'bounded': True})
 
             return updated_chat
         except Exception:

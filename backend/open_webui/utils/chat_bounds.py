@@ -2,8 +2,13 @@
 
 A chat is loaded and saved whole on every turn and every open, so one ~900 MB chat took a 16 GB task out. Only the
 saved copies of tool results, citation excerpts and file text copied into a message are bounded here; what people
-type and what models write is never changed. A shortened text keeps its start and end and says how much was removed,
-so running the bounds again on their own output changes nothing (the frontend saves back what it was served).
+type and what models write is never changed. That includes answers people give to ask_user, approval and agent
+resolutions, and the hidden context the model must keep whole (preloaded skills, manifests, recalled memories).
+
+A shortened text keeps its start and end and says how much was removed (from the original length, also when it is
+shortened again), so running the bounds again on their own output changes nothing; the frontend saves back what it
+was served. Once a chat is over its budget it is brought down to a lower watermark with stepped caps, so steady growth
+does not re-shorten the same copies on every save.
 
 Inputs are never modified: a message that needs bounding is copied first, because callers such as the tool loop
 keep using their live objects for the model.
@@ -13,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import re
 from types import SimpleNamespace
 
 from open_webui import env
@@ -28,16 +34,51 @@ SOURCE_NOTE = (
     'Open the source to read all of it.]\n\n'
 )
 NOTES = {'tool': TOOL_NOTE, 'source': SOURCE_NOTE}
-# Used when nothing of an old copy is kept (only for chats still over budget after every copy is a short preview).
+# Used when nothing of a copy is kept: only for chats still over budget after every copy is a short preview.
 REMOVED_NOTES = {
-    'tool': '[Saved copy removed: this old tool result ({total:,} characters) was removed to keep this chat small. '
+    'tool': '[Saved copy removed: this tool result ({total:,} characters) was removed to keep this chat small. '
     'Run the tool again to see it.]',
     'source': '[Citation excerpt removed ({total:,} characters) to keep this chat small. Open the source to read it.]',
 }
+NOTE_MARKERS = (
+    '[Saved copy shortened: ',
+    '[Saved copy removed: ',
+    '[Citation excerpt shortened: ',
+    '[Citation excerpt removed (',
+)
+_SHORTENED_TOTAL = re.compile(r'\[(?:Saved copy|Citation excerpt) shortened: [\d,]+ of ([\d,]+) characters')
+_REMOVED_TOTAL = re.compile(
+    r'\[(?:Saved copy removed: this tool result|Citation excerpt removed) \(([\d,]+) characters'
+)
+# Tool calls whose results hold what a person answered or context the model must keep whole.
+KEPT_CALL_NAMES = frozenset({'ask_user'})
+# Chat-budget caps are rounded down to these multiples of the preview floor, so they do not creep save by save.
+STEP_MULTIPLES = (1, 2.5, 5, 10, 25, 50, 100, 200)
+# After the chat budget is exceeded, the chat is brought down to this share of it.
+WATERMARK = 0.75
+
+_compaction = {'enabled': False}
 
 
 def enabled() -> bool:
     return bool(env.CHAT_STORAGE_BOUNDS)
+
+
+def note_compaction_enabled(value: bool) -> None:
+    """Record whether context compaction is on (read with its config on every request).
+
+    Until it is known to be on, every message of the current branch counts as replayed.
+    """
+    _compaction['enabled'] = bool(value)
+
+
+def has_bound_note(value) -> bool:
+    """True when a saved text (or list of text parts) was shortened or removed by these bounds."""
+    if isinstance(value, list):
+        value = ' '.join(
+            part.get('text', '') for part in value if isinstance(part, dict) and isinstance(part.get('text'), str)
+        )
+    return isinstance(value, str) and any(marker in value for marker in NOTE_MARKERS)
 
 
 def _limits() -> SimpleNamespace:
@@ -55,11 +96,16 @@ def _limits() -> SimpleNamespace:
     )
 
 
+def _original_length(text: str) -> int:
+    match = _SHORTENED_TOTAL.search(text) or _REMOVED_TOTAL.search(text)
+    return max(int(match.group(1).replace(',', '')), len(text)) if match else len(text)
+
+
 def shorten(text: str, target: int, kind: str = 'tool') -> str:
     """Keep the start and end of ``text`` within ``target`` characters, with a note in the middle."""
-    total = len(text)
-    if total <= target:
+    if len(text) <= target:
         return text
+    total = _original_length(text) if has_bound_note(text) else len(text)
     template = NOTES[kind]
     keep = max(target - len(template.format(removed=total, total=total)), 0)
     if keep == 0:
@@ -84,11 +130,37 @@ def _cap_for(lengths: list[int], budget: int) -> int | None:
     return ordered[-1]
 
 
+def _step_down(cap: int, floor: int) -> int:
+    """Round a cap down to a fixed step (never below ``floor``), so repeated passes reuse the same cap."""
+    if cap <= floor:
+        return floor
+    steps = [int(floor * multiple) for multiple in STEP_MULTIPLES]
+    if cap >= steps[-1]:
+        return cap // steps[-1] * steps[-1]
+    return max(step for step in steps if step <= cap)
+
+
+def _kept_call_ids(output: list) -> set:
+    kept = set()
+    for item in output:
+        if (
+            isinstance(item, dict)
+            and item.get('type') == 'function_call'
+            and (item.get('hidden') is True or item.get('name') in KEPT_CALL_NAMES or item.get('agent_resolution'))
+        ):
+            kept.add(item.get('call_id'))
+    return kept
+
+
 def _tool_slots(output) -> list[tuple[str, tuple, int]]:
     slots = []
-    for index, item in enumerate(output if isinstance(output, list) else []):
+    output = output if isinstance(output, list) else []
+    kept = _kept_call_ids(output)
+    for index, item in enumerate(output):
         if not isinstance(item, dict) or item.get('type') != 'function_call_output':
             continue
+        if item.get('call_id') in kept or item.get('status') == 'rejected':
+            continue  # an answer, a resolution or hidden context: never shortened
         value = item.get('output')
         if isinstance(value, str):
             slots.append(('tool', ('output', index, 'output'), len(value)))
@@ -114,32 +186,44 @@ def _slots(message: dict) -> list[tuple[str, tuple, int]]:
     return _tool_slots(message.get('output')) + _source_slots(message.get('sources'))
 
 
-def _file_drops(message: dict, limit: int) -> list[int]:
-    """Attached files whose copied text is too large to keep in the message (the file record keeps it)."""
+def _get(message: dict, path: tuple):
+    value = message
+    for key in path:
+        value = value[key]
+    return value
+
+
+def _has_inline_text(item, limit: int) -> bool:
+    if not isinstance(item, dict) or item.get('type') != 'file' or not item.get('id'):
+        return False
+    data = item['file'].get('data') if isinstance(item.get('file'), dict) else None
+    return isinstance(data, dict) and isinstance(data.get('content'), str) and len(data['content']) > limit
+
+
+def _inline_drops(message: dict, limits: SimpleNamespace) -> list[tuple]:
+    """File items whose copied text is dropped (the file record keeps it): attachments and citation sources."""
     drops = []
     files = message.get('files')
-    if not isinstance(files, list):
-        return drops
-    for index, item in enumerate(files):
-        if not isinstance(item, dict) or item.get('type') != 'file' or not item.get('id'):
-            continue
-        data = (item.get('file') or {}).get('data') if isinstance(item.get('file'), dict) else None
-        if isinstance(data, dict) and isinstance(data.get('content'), str) and len(data['content']) > limit:
-            drops.append(index)
+    for index, item in enumerate(files if isinstance(files, list) else []):
+        if _has_inline_text(item, limits.inline_file):
+            drops.append(('files', index))
+    sources = message.get('sources')
+    for index, source in enumerate(sources if isinstance(sources, list) else []):
+        # A citation's source is the request's file item; its copied text duplicates the excerpt in 'document'.
+        if isinstance(source, dict) and _has_inline_text(source.get('source'), limits.source_document):
+            drops.append(('sources', index, 'source'))
     return drops
 
 
-def _apply(message: dict, targets: dict[tuple, tuple[str, int]], drops: list[int]) -> dict:
+def _apply(message: dict, targets: dict[tuple, tuple[str, int]], drops: list[tuple]) -> dict:
     if not targets and not drops:
         return message
     bounded = copy.deepcopy(message)  # containers are copied; the strings themselves are shared, not duplicated
     for path, (kind, target) in targets.items():
-        container = bounded
-        for key in path[:-1]:
-            container = container[key]
+        container = _get(bounded, path[:-1])
         container[path[-1]] = shorten(container[path[-1]], target, kind)
-    for index in drops:
-        bounded['files'][index]['file']['data'].pop('content', None)
+    for path in drops:
+        _get(bounded, path)['file']['data'].pop('content', None)
     return bounded
 
 
@@ -153,7 +237,7 @@ def _message_targets(slots: list[tuple[str, tuple, int]], limits: SimpleNamespac
         capped = [min(length, per_item) for _, length in group]
         cap = _cap_for(capped, budget)
         if cap is not None:
-            cap = max(cap, limits.floor)
+            cap = _step_down(max(cap, limits.floor), limits.floor)
         for (path, length), value in zip(group, capped):
             target = value if cap is None else min(value, cap)
             if target < length:
@@ -164,7 +248,7 @@ def _message_targets(slots: list[tuple[str, tuple, int]], limits: SimpleNamespac
 def _bound_with_slots(message, limits: SimpleNamespace):
     slots = _slots(message)
     targets = _message_targets(slots, limits)
-    drops = _file_drops(message, limits.inline_file)
+    drops = _inline_drops(message, limits)
     if not targets and not drops:
         return message, slots
     bounded = _apply(message, targets, drops)
@@ -180,6 +264,50 @@ def bound_message(message):
     except Exception:
         log.exception('Could not bound a saved chat message; keeping it as it is')
         return message
+
+
+def bound_files(files):
+    """Drop copied text over the inline limit from a list of file items (a chat's top-level ``files``)."""
+    if not enabled() or not isinstance(files, list):
+        return files
+    try:
+        return _apply({'files': files}, {}, _inline_drops({'files': files}, _limits()))['files']
+    except Exception:
+        log.exception('Could not bound chat files; keeping them as they are')
+        return files
+
+
+def _children(view: dict) -> dict:
+    children: dict = {}
+    for key, message in view.items():
+        if isinstance(message, dict):
+            children.setdefault(message.get('parentId'), []).append(key)
+    return children
+
+
+def _last_descendant(view: dict, message_id: str) -> str:
+    """Follow the newest child from ``message_id`` (as ChatTable._last_descendant_id does)."""
+    seen = set()
+    while message_id in view and message_id not in seen:
+        seen.add(message_id)
+        message = view[message_id]
+        child_ids = message.get('childrenIds') if isinstance(message, dict) else []
+        next_id = next(
+            (
+                child_id
+                for child_id in reversed(child_ids if isinstance(child_ids, list) else [])
+                if isinstance(child_id, str)
+                and child_id not in seen
+                and isinstance(child := view.get(child_id), dict)
+                and child.get('role')
+                and child.get('parentId') == message_id
+            ),
+            None,
+        )
+        if not next_id:
+            break
+        message_id = next_id
+    return message_id
 
 
 def _branch(messages: dict, current_id: str | None) -> list[str]:
@@ -200,7 +328,9 @@ def _branch(messages: dict, current_id: str | None) -> list[str]:
 
 
 def _replayed(messages: dict, branch: list[str]) -> set[str]:
-    """Branch messages the model still reads: those after the latest compaction checkpoint."""
+    """Branch messages the model still reads: all of them, unless compaction is on and a checkpoint cuts earlier."""
+    if not _compaction['enabled']:
+        return set(branch)
     try:
         from open_webui.utils.context_compaction import _apply_latest_summary_checkpoint
 
@@ -216,71 +346,86 @@ def _total(slots: dict) -> int:
 
 
 def _shorten_to(view: dict, slots: dict, key: str, cap: int, changed: set[str], above: int | None = None) -> int:
-    """Shorten one message's saved texts longer than ``above`` (default ``cap``) to ``cap``; return chars removed."""
+    """Shorten one message's saved texts longer than ``above`` (default ``cap``) to ``cap``; return chars removed.
+
+    A text that already carries a saved-copy note is left alone unless it is well above the new cap.
+    """
     above = cap if above is None else above
-    targets = {path: (kind, cap) for kind, path, length in slots[key] if length > above}
+    message = view[key]
+    targets = {}
+    for kind, path, length in slots[key]:
+        if length <= above or (length <= cap * 3 // 2 and has_bound_note(_get(message, path))):
+            continue
+        targets[path] = (kind, cap)
     if not targets:
         return 0
     before = sum(length for _, _, length in slots[key])
-    view[key] = _apply(view[key], targets, [])
+    view[key] = _apply(message, targets, [])
     changed.add(key)
     slots[key] = _slots(view[key])
     return before - sum(length for _, _, length in slots[key])
 
 
+def _protected(view: dict, branch: list[str], limits: SimpleNamespace, keep: set[str]) -> set[str]:
+    protected = set(branch[-limits.protected :]) if limits.protected else set()
+    # Other replies to the newest prompts (multi-model replies, the previous regeneration) and edited prompts.
+    children = _children(view)
+    for key in list(protected):
+        protected.update(children.get(view[key].get('parentId'), []))
+    # A reply still being written is the tool loop's live state; so is any message a caller is saving right now.
+    protected |= keep
+    protected |= {key for key, message in view.items() if isinstance(message, dict) and message.get('done') is False}
+    return protected
+
+
+def _tiers(view: dict, slots: dict, current_id: str | None, limits: SimpleNamespace, keep: set[str]) -> list[list]:
+    """Message ids that may be shortened, oldest first: copies the model no longer reads, then older replayed ones."""
+    if current_id in view:
+        current_id = _last_descendant(view, current_id)
+    branch = _branch(view, current_id)
+    protected = _protected(view, branch, limits, keep)
+    replayed = _replayed(view, branch)
+    position = {key: index for index, key in enumerate(branch)}
+    unread = sorted(
+        (key for key in slots if key not in replayed and key not in protected),
+        key=lambda key: (key in position, position.get(key, 0), view[key].get('timestamp') or 0),
+    )
+    return [unread, [key for key in branch if key in replayed and key not in protected and key in slots]]
+
+
 def _fit_chat(
     view: dict, slots: dict, current_id: str | None, limits: SimpleNamespace, changed: set[str], keep: set[str]
 ) -> None:
-    """Shorten saved copies across the chat, in ``view``, until it fits the chat budget.
+    """Shorten saved copies across the chat, in ``view``, once it is over the chat budget.
 
-    Per tier: first the largest copies, down to a generous preview; then, oldest message first, copies down to a short
-    preview, so a long chat of many medium results keeps its recent ones whole; and only if that is still not enough,
-    the oldest copies down to a note.
+    The chat is brought down to WATERMARK of the budget in three steps, each across every tier before the next:
+    the largest copies to stepped caps no lower than a generous preview; then, oldest message first, copies to a short
+    preview; and only if that is still not enough, oldest first, copies to a note.
     """
     total = _total(slots)
     if total <= limits.chat_bulk:
         return
-    branch = _branch(view, current_id)
-    protected = set(branch[-limits.protected :]) if limits.protected else set()
-    # A reply still being written is the tool loop's live state; so is any message a caller is saving right now.
-    protected |= keep
-    protected |= {key for key, message in view.items() if isinstance(message, dict) and message.get('done') is False}
-    replayed = _replayed(view, branch)
-    position = {key: index for index, key in enumerate(branch)}
-    # Other branches first (oldest first), then the current branch's messages before its latest checkpoint.
-    off_branch = sorted(
-        (key for key in slots if key not in replayed and key not in protected),
-        key=lambda key: (key in position, position.get(key, 0), view[key].get('timestamp') or 0),
-    )
-    tiers = [off_branch, [key for key in branch if key in replayed and key not in protected]]
+    target = int(limits.chat_bulk * WATERMARK)
+    tiers = _tiers(view, slots, current_id, limits, keep)
     for tier in tiers:
         lengths = [length for key in tier for _, _, length in slots[key]]
-        cap = _cap_for(lengths, max(limits.chat_bulk - (total - sum(lengths)), 0))
-        if cap is None:
-            continue  # this tier is empty or already small; the next one has to give
-        for key in tier:
-            total -= _shorten_to(view, slots, key, max(cap, limits.floor), changed)
-        for key in tier:
-            if total <= limits.chat_bulk:
+        cap = _cap_for(lengths, max(target - (total - sum(lengths)), 0)) if total > target else None
+        if cap is not None:
+            cap = _step_down(max(cap, limits.floor), limits.floor)
+            total -= sum(_shorten_to(view, slots, key, cap, changed) for key in tier)
+    removed_note = len(REMOVED_NOTES['tool'].format(total=10**9)) * 3 // 2
+    for cap, above in ((limits.old_preview, None), (0, removed_note)):
+        for key in (key for tier in tiers for key in tier):
+            if total <= target:
                 return
-            total -= _shorten_to(view, slots, key, limits.old_preview, changed)
-        # Still over with every copy a short preview (thousands of results): oldest copies keep only a note.
-        removed_note = len(REMOVED_NOTES['tool'].format(total=10**9)) * 3 // 2
-        for key in tier:
-            if total <= limits.chat_bulk:
-                return
-            total -= _shorten_to(view, slots, key, 0, changed, above=removed_note)
-        if total <= limits.chat_bulk:
-            return
+            total -= _shorten_to(view, slots, key, cap, changed, above=above)
 
 
 def bound_messages_map(messages, current_id: str | None = None, keep=()) -> tuple[dict, set[str]]:
     """Bound every message, then the whole chat. Return the map (a new one if anything changed) and changed ids.
 
-    The newest messages of the current branch, replies still being written and ``keep`` are never shortened for the
-    chat budget (they still get the per-message bounds). Copies the model no longer
-    reads (other branches, and messages before the latest compaction) are shortened first, largest first; copies it
-    still replays only when those were not enough.
+    The newest messages of the current branch and their siblings, replies still being written and ``keep`` are never
+    shortened for the chat budget (they still get the per-message bounds).
     """
     if not enabled() or not isinstance(messages, dict):
         return messages, set()
@@ -304,8 +449,12 @@ def bound_messages_map(messages, current_id: str | None = None, keep=()) -> tupl
         return messages, set()
 
 
-def bound_chat_with_changes(chat) -> tuple[dict, set[str]]:
-    """Bound a chat body (history and its ``messages`` list). Return it and the ids of changed history messages."""
+def bound_chat_with_changes(chat, keep=()) -> tuple[dict, set[str]]:
+    """Bound a chat body (history, its ``messages`` list and ``files``). Return it and the changed history ids.
+
+    ``keep`` names messages a caller is saving right now: they get their own bounds but are never shortened for the
+    chat budget.
+    """
     if not enabled() or not isinstance(chat, dict):
         return chat, set()
     history = chat.get('history')
@@ -314,7 +463,7 @@ def bound_chat_with_changes(chat) -> tuple[dict, set[str]]:
     new_map = None
     if isinstance(history, dict) and isinstance(history.get('messages'), dict):
         current_id = history.get('currentId') or chat.get('currentId') or chat.get('branchPointMessageId')
-        new_map, changed = bound_messages_map(history['messages'], current_id)
+        new_map, changed = bound_messages_map(history['messages'], current_id, keep)
         if changed:
             result = {**chat, 'history': {**history, 'messages': new_map}}
     listed = chat.get('messages')
@@ -322,14 +471,15 @@ def bound_chat_with_changes(chat) -> tuple[dict, set[str]]:
         bounded_list, list_changed = [], False
         for message in listed:
             key = message.get('id') if isinstance(message, dict) else None
-            if key in changed:
-                bounded = new_map[key]
-            else:
-                bounded = bound_message(message)
+            bounded = new_map[key] if key in changed else bound_message(message)
             list_changed = list_changed or bounded is not message
             bounded_list.append(bounded)
         if list_changed:
             result = {**result, 'messages': bounded_list}
+    files = chat.get('files')
+    bounded_chat_files = bound_files(files)
+    if bounded_chat_files is not files:
+        result = {**result, 'files': bounded_chat_files}
     return result, changed
 
 

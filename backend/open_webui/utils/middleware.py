@@ -106,6 +106,7 @@ from open_webui.utils.filter import (
 from open_webui.utils.json_codec import JSONCodec, dumps_bytes
 from open_webui.utils.mcp.apps import MCPAppResult
 from open_webui.utils.memory import add_memory_context, recall_memories, review_memory_after_turn
+from open_webui.utils.chat_bounds import has_bound_note
 from open_webui.utils.misc import (
     add_or_update_system_message,
     add_or_update_user_message,
@@ -2665,8 +2666,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     if files:
         # files = [*files, *[{"type": "url", "url": url, "name": url} for url in urls]]
-        # Remove duplicate files based on their content
-        files = list({json.dumps(f, sort_keys=True): f for f in files}.values())
+        # Remove duplicate files: by id where they have one (a saved copy may lack the inline text the chat's own
+        # copy still has), otherwise by content
+        files = list({request_file_key(f): f for f in files}.values())
 
     metadata.update(
         {
@@ -3095,6 +3097,12 @@ async def preload_memory(request, messages: list[dict], user, model: dict) -> li
     return hidden_tool_result('recall_memories', result) if result else []
 
 
+def request_file_key(item) -> tuple:
+    if isinstance(item, dict) and isinstance(item.get('id'), str) and item['id']:
+        return ('id', item.get('type'), item['id'], item.get('context'))
+    return ('json', json.dumps(item, sort_keys=True))
+
+
 def hidden_tool_result(name: str, result: str) -> list[dict]:
     """Use ordinary saved tool output for internal context without displaying it in chat."""
     call_id = output_id('fc')
@@ -3125,7 +3133,10 @@ async def preload_skills(messages: list[dict], skill_ids: set[str], tool: dict |
     completed = {
         message.get('tool_call_id')
         for message in messages
-        if message.get('role') == 'tool' and not _is_tool_result_error(message.get('content', ''))
+        if message.get('role') == 'tool'
+        and not _is_tool_result_error(message.get('content', ''))
+        # A saved copy shortened to keep the chat small no longer holds the whole skill.
+        and not has_bound_note(message.get('content', ''))
     }
     loaded = set()
     for message in messages:
