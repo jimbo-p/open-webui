@@ -54,91 +54,86 @@ the last 14 days, 429 messages saved more than 512 KB (compressed) of tool
 results, mostly many medium results in long tool loops rather than one huge
 one.
 
-`utils/chat_bounds.py` bounds only saved copies of tool results, citation
-excerpts and file text copied into a message. It never changes what people
-type, what models write, `ask_user` answers, approval and agent resolutions
-(results paired by `call_id` with an `ask_user` call, a call carrying
-`agent_resolution`, or a rejected call), or hidden context the model must keep
-whole: results of `hidden` calls such as preloaded `view_skill`, the skill and
-knowledge manifests and `recall_memories`. A shortened text keeps its start
-and end with a neutral note saying how much was removed (counted from the
-original length even when it is shortened again; the note no longer asks the
-model to run a tool again), and the bounds are stable on their own output.
-When the frontend posts back the full copy of a text the server had
-shortened (it keeps what it streamed), `update_chat_by_id` keeps the
-shortened copy, so rows do not swing between full and shortened.
-`preload_skills` treats a `view_skill` result carrying a note these bounds
-wrote (the exact note, with its numbers) as not loaded and loads it again.
+`utils/chat_bounds.py` follows five rules (its module docstring has them
+in full):
 
-- Per message: all tool results together keep at most
-  `CHAT_MESSAGE_TOOL_OUTPUT_MAX_CHARS` (8,000,000) characters, the largest
-  shortened first to a stepped cap of at least `CHAT_TRIM_PREVIEW_MIN_CHARS`
-  (20,000); a message with more results than that allows, oldest first to
-  `CHAT_TRIM_OLD_PREVIEW_CHARS` (2,000) and then to a note, keeping its newest
-  results. A citation excerpt keeps `CHAT_SOURCE_DOCUMENT_MAX_CHARS`
-  (100,000) and a message's excerpts `CHAT_MESSAGE_SOURCES_MAX_CHARS`
-  (2,000,000); citations are only shown, never sent to the model.
-- Copied file text: a citation source's own copy of a file, web page or video
-  transcript above 100,000 characters is always dropped (the excerpt is in
-  `document`, and the attachment keeps the text). An attachment's text above
-  `CHAT_INLINE_FILE_CONTENT_MAX_CHARS` (1,000,000), in a message or in the
-  chat's top-level `files`, is dropped only on save paths that checked the
-  file record holds text of its own, and the item is marked
-  `content_in_file_record`; retrieval then reads the record. An imported chat
-  from another instance therefore keeps its attachments' text. Request files
-  are deduplicated by type, id and context.
-- Per chat: once tool results and citation excerpts together pass
-  `CHAT_STORED_BULK_MAX_CHARS` (16,000,000 characters, about four times the
-  largest model context), the chat is brought down to three quarters of it,
-  or to the budget itself when the protected messages leave no room for the
-  watermark with previews. Caps are rounded down to fixed steps, and a text
-  already carrying a note is left alone unless it is well above the new cap,
-  so steady growth does not shorten again on every save. Order: citation
-  excerpts first, all the way (preview, short preview, note) before any tool
-  result; then tool results, each step across both tiers (those the model no
-  longer reads, then those it replays) before the next: stepped previews of at
-  least 20,000 characters, then, only while still over the budget, oldest
-  first a 2,000-character preview and then a note.
-- Protected from the chat budget, whatever branch a save points at: the
-  newest `CHAT_BOUND_PROTECTED_MESSAGES` (4) messages of both the posted
-  current id's branch and the newest message's branch (each followed to its
-  newest descendant), every other reply to those messages' parents with the
-  replies under it (the previous regeneration, multi-model replies, and the
-  answer to a prompt before it was edited), replies still being written and
-  the message being saved. Messages before the latest compaction checkpoint
-  count as unread only while context compaction is on.
-- Where: `ChatModel` bounds the chat it carries, so every open, export and
-  share is bounded (without dropping attachment text, which needs the file
-  check); save paths that have just bounded what they store build it with
-  `context={'bounded': True}`. Message saves
-  (`upsert_message_to_chat_by_id_and_message_id`, `update_chat_by_id`,
-  `edit_message_output`) bound what they store and write the bounded columns
-  of any older message shortened for the chat budget to its existing
-  `chat_message` row; a message without a row is left for the backfill, which
-  writes it whole from the bounded chat. New, forked and imported chats write
-  their rows from the bounded chat. `chat_message` writes and the replay map
-  bound each message; share snapshots copy the bounded chat. The stored
-  format is unchanged, so rolling back the image needs nothing else.
-- Existing chats heal the next time they are saved. The first load of a chat
-  saved before the bounds still costs what it did, so
-  `python -m open_webui.utils.chat_bounds_repair` shrinks them ahead of time
-  with the same decisions (compaction read from the config table, the file
-  check, and the chat JSON's decisions for its rows). The dry run takes no
-  lock and writes nothing; `--sizes-only` lists sizes without reading chats.
-  `--apply --backup-dir DIR` reads and plans in one REPEATABLE READ snapshot,
-  streams the exact original bytes into a new backup (gzip level 1 plus a
-  manifest with checksums; never replacing a file), then locks the chat only
-  to check it is unchanged and write; a chat that changed meanwhile is
-  skipped and its unused backup removed. `--restore MANIFEST` stages the
-  backup before locking, refuses (unless `--force`) when the chat changed
-  after the repair, and does nothing when it is already as backed up.
-  Failures are reported per chat, the run goes on, and the exit code is
-  non-zero when any chat failed or changed; `--max-mb` (uncompressed) leaves
-  larger chats for a bigger host. Peak memory is about 1.3x the larger of the
-  chat and its rows on top of the interpreter, up to about 5x when its large
-  results contain characters outside the Basic Multilingual Plane; never run
-  it inside a serving task. `updated_at` is left alone.
-- `CHAT_STORAGE_BOUNDS=false` turns all of it off.
+1. Only saved copies are bounded: tool results, citation excerpts and copies
+   of file text. What people type, what models write, `ask_user` answers,
+   approval and agent resolutions, and the results of `hidden` calls
+   (preloaded `view_skill`, the manifests, `recall_memories`) are never
+   changed.
+2. History is the one source of truth. The top-level `messages` list holds
+   the bounded history's copy of every message it names, so a tab posting
+   back the full copies it streamed cannot grow it. A citation source's own
+   copy of a file's, page's or search result's text (`source.file.data.content`,
+   `source.docs[].content`) is never kept: nothing reads it there. An
+   attachment's text over `CHAT_INLINE_FILE_CONTENT_MAX_CHARS` (1,000,000) is
+   dropped, and the item marked `content_in_file_record`, only when a file
+   record of the chat's owner with that id holds text of the same length;
+   clones, forks and imports by another user keep their copy.
+3. Recent work is protected whatever branch a save points at: replies still
+   being written and the message being saved, then, newest first and up to
+   three quarters of the budget, everything written since the last
+   `CHAT_BOUND_PROTECTED_TURNS` (2) prompts, and everything under the parent
+   of the newest prompt and of the newest message (the fork a regeneration,
+   an edit or another model's reply hangs from, on all of its branches).
+4. Once tool results and citation excerpts together pass
+   `CHAT_STORED_BULK_MAX_CHARS` (16,000,000 characters), copies are shortened
+   in a fixed order, each group all the way before the next: citation
+   excerpts, then tool results the model no longer replays (other branches,
+   and before a compaction checkpoint while compaction is on), then the
+   replayed tool results. Replayed results never go below
+   `CHAT_TRIM_OLD_PREVIEW_CHARS` (2,000), even if the chat then stays over
+   budget; only unread copies become notes. Per message, tool results keep
+   `CHAT_MESSAGE_TOOL_OUTPUT_MAX_CHARS` (8,000,000) together, the largest
+   first to a stepped preview of at least `CHAT_TRIM_PREVIEW_MIN_CHARS`
+   (20,000), then the oldest to the short preview; a citation excerpt keeps
+   `CHAT_SOURCE_DOCUMENT_MAX_CHARS` (100,000) and a message's excerpts
+   `CHAT_MESSAGE_SOURCES_MAX_CHARS` (2,000,000).
+5. A shortened text keeps its start and end with a neutral note, counted
+   from the original length, so the bounds are stable on their own output.
+   Caps are stepped, and an over-budget chat is brought down to three
+   quarters of the budget where previews allow, so steady growth does not
+   re-shorten on every save. When a client posts back a longer copy (full or
+   an earlier preview) of a text the server had shortened, `update_chat_by_id`
+   keeps the stored copy.
+
+Where it runs: `ChatModel` bounds the chat it carries on every open, export
+and share (without the attachment check, which needs the database); save
+paths that have just bounded what they store pass
+`context={'bounded': True}`. Message saves bound what they store, after
+reading the compaction setting (at most once a minute per worker), and write
+the bounded columns of older messages shortened for the budget to their
+existing `chat_message` rows; a message without a row is left to the
+backfill, which writes it whole from the bounded chat. New, forked and
+imported chats write their rows from the bounded chat. `preload_skills`
+treats a `view_skill` result carrying a note these bounds wrote as not
+loaded. The stored format is unchanged, so rolling back the image needs
+nothing else, and `CHAT_STORAGE_BOUNDS=false` turns all of it off.
+
+Existing chats heal the next time they are saved. The first load of a chat
+saved before the bounds still costs what it did, so
+`python -m open_webui.utils.chat_bounds_repair` shrinks them ahead of time,
+and the shared-chat snapshots that copied them, with the app's decisions:
+compaction read from the config table, the same owner file check, and each
+`chat_message` row given the chat JSON's decision for its message. The dry
+run takes no row lock and writes nothing; `--sizes-only` lists sizes without
+reading chats. `--apply --backup-dir DIR` reads and plans in one REPEATABLE
+READ snapshot (which holds ACCESS SHARE on the tables: do not run it while a
+deploy that runs migrations is active or queued), streams the exact original
+bytes of what changes into a new backup (gzip level 1 plus a manifest with
+checksums, never replacing a file), then locks briefly to check nothing
+changed, writes, and commits as a separate step. A backup whose changes were
+not written is removed; when the commit outcome is unknown, a fresh
+connection decides, and the backup is kept unless the chat is unchanged.
+`--restore MANIFEST` stages the backup before locking, refuses (unless
+`--force`) when what the repair wrote has changed since, leaves the chat JSON
+alone for a rows-only repair, and does nothing when the chat is already as
+backed up. Failures are reported per chat, the run goes on, and the exit code
+is non-zero when any chat failed or changed. Peak memory is about 1.3x the
+larger of the chat and its rows on top of the interpreter, up to about 5x
+when its large results contain characters outside the Basic Multilingual
+Plane; never run it inside a serving task.
 
 Regressions are in `test/backend/test_chat_bounds.py`, and the repair's in
 `test/backend/test_chat_bounds_repair_postgres.py` (run with

@@ -8,15 +8,21 @@ chat's copy of its message takes exactly that message's result; other rows are b
 replayed messages worked out from the chat JSON).
 
 Dry run by default: it lists the chats whose chat JSON or chat_message rows are stored above --min-mb (compressed, as
-PostgreSQL stores them) with their uncompressed sizes and the size after, by id only. It takes no lock and writes
-nothing. --sizes-only lists the sizes without reading the chats.
+PostgreSQL stores them), and the shared-chat snapshots above it (copied whole before the bounds, and never healed by
+the app), with their uncompressed sizes and the size after, by id only. It takes no row lock and writes nothing.
+--sizes-only lists the sizes without reading the chats.
 
---apply needs --backup-dir. For each chat that changes, the original chat JSON and the original columns of the rows
-that change are streamed, as the exact bytes PostgreSQL holds, into a new backup: a gzip data file and a small JSON
-manifest, written under temporary names, fsynced and then published without ever replacing an existing file. Reading,
-planning and the backup take no lock (one REPEATABLE READ snapshot); the chat is then locked only to check that it and
-the rows to change are as they were read, and to write them. A chat that changed meanwhile is skipped, and a backup
-whose changes were not written is removed again. updated_at is left alone, so chat lists keep their order.
+--apply needs --backup-dir. For each chat that changes, the original chat JSON (when it changes) and the original
+columns of the rows that change are streamed, as the exact bytes PostgreSQL holds, into a new backup: a gzip data
+file and a small JSON manifest, written under temporary names, fsynced and then published without ever replacing an
+existing file. Reading, planning and the backup take no row lock (one REPEATABLE READ snapshot); the chat is then
+locked only to check that it and
+the rows to change are as they were read, and to write them, then commits as a separate step. A chat that changed
+meanwhile is skipped, and a backup whose changes were not written is removed again; when the commit outcome is
+unknown, the result is checked on a fresh connection and the backup is kept unless the chat is unchanged. updated_at
+is left alone, so chat lists keep their order. Each chat's snapshot holds no row lock but does hold ACCESS SHARE on
+chat and chat_message, which a schema migration waits for: do not run this while a deploy that runs migrations is
+active or queued.
 --restore MANIFEST stages the backup first, then locks the chat only to check and write: it refuses, unless --force,
 when the chat or those rows changed after the repair (that would drop the newer work), and does nothing when the chat
 is already as backed up.
@@ -134,13 +140,13 @@ class ChatPlan:
     rows lack), so both stores protect the same newest turns.
     """
 
-    def __init__(self, chat: dict, current_id: str | None = None, droppable_files=frozenset()):
+    def __init__(self, chat: dict, current_id: str | None = None, droppable_files=None):
         history = chat.get('history') if isinstance(chat.get('history'), dict) else {}
         messages = history.get('messages') if isinstance(history.get('messages'), dict) else {}
         # The same current id the app's bounds use for this chat body, then the column.
         posted = history.get('currentId') or chat.get('currentId') or chat.get('branchPointMessageId')
         self.current_id = posted if isinstance(posted, str) else current_id
-        self.droppable_files = frozenset(droppable_files)
+        self.droppable_files = dict(droppable_files or {})
         self.layout = chat_layout(messages, self.current_id)
         bounded, changed = bound_chat_with_changes(chat, droppable_files=self.droppable_files)
         self.bounded_chat = None if bounded is chat else bounded
@@ -218,13 +224,13 @@ def _stream(connection, query: str, params: tuple, itersize: int = 4):
 
 CHAT_TOP = """SELECT key, json_typeof(value),
        CASE WHEN key IN ('history', 'messages') THEN NULL ELSE convert_to(value::text, 'UTF8') END
-  FROM json_each((SELECT chat FROM chat WHERE id = %s))"""
+  FROM json_each((SELECT chat FROM {table} WHERE id = %s))"""
 HISTORY_TOP = """SELECT key, json_typeof(value),
        CASE WHEN key = 'messages' THEN NULL ELSE convert_to(value::text, 'UTF8') END
-  FROM json_each((SELECT chat->'history' FROM chat WHERE id = %s))"""
+  FROM json_each((SELECT chat->'history' FROM {table} WHERE id = %s))"""
 LIST_ELEMENTS = """SELECT e.ordinality - 1, convert_to(e.value::text, 'UTF8')
-  FROM json_array_elements((SELECT chat->'messages' FROM chat WHERE id = %s)) WITH ORDINALITY e(value, ordinality)"""
-_MESSAGES = "json_each((SELECT chat->'history'->'messages' FROM chat WHERE id = %s)) m"
+  FROM json_array_elements((SELECT chat->'messages' FROM {table} WHERE id = %s)) WITH ORDINALITY e(value, ordinality)"""
+_MESSAGES = "json_each((SELECT chat->'history'->'messages' FROM {table} WHERE id = %s)) m"
 _FIELDS = "json_each(CASE WHEN json_typeof(m.value) = 'object' THEN m.value ELSE '{}'::json END) f"
 MESSAGE_ODD = f"SELECT m.key, convert_to(m.value::text, 'UTF8') FROM {_MESSAGES} WHERE json_typeof(m.value) <> 'object'"
 MESSAGE_FIELDS = f"""SELECT m.key, f.key, json_typeof(f.value),
@@ -259,9 +265,20 @@ def _fill(arrays: dict, owner, field, index, data) -> None:
     arrays[(owner, field)][index] = _loads(data)
 
 
-def _value(connection, chat_id: str, path: str):
+TABLES = ('chat', 'shared_chat')
+
+
+def _q(query: str, table: str) -> str:
+    if table not in TABLES:
+        raise ValueError(f'unexpected table {table!r}')
+    return query.replace('{table}', table)
+
+
+def _value(connection, chat_id: str, path: str, table: str = 'chat'):
     """One JSON value of the chat, parsed from its UTF-8 bytes (used for small or unusual shapes only)."""
-    found = connection.execute(f"SELECT convert_to(({path})::text, 'UTF8') FROM chat WHERE id = %s", (chat_id,))
+    found = connection.execute(
+        _q(f"SELECT convert_to(({path})::text, 'UTF8') FROM {{table}} WHERE id = %s", table), (chat_id,)
+    )
     return _loads(found.fetchone()[0])
 
 
@@ -274,44 +291,45 @@ def _object(connection, query: str, chat_id: str) -> tuple[dict, dict]:
     return values, kinds
 
 
-def read_chat(connection, chat_id: str) -> dict:
+def read_chat(connection, chat_id: str, table: str = 'chat') -> dict:
     """The chat JSON as a dict, read key by key, message by message and array element by element."""
-    kind = connection.execute('SELECT json_typeof(chat) FROM chat WHERE id = %s', (chat_id,)).fetchone()
+    kind = connection.execute(_q('SELECT json_typeof(chat) FROM {table} WHERE id = %s', table), (chat_id,)).fetchone()
     if kind is None:
         raise LookupError(chat_id)
     if kind[0] != 'object':
-        return _value(connection, chat_id, 'chat')
-    chat, kinds = _object(connection, CHAT_TOP, chat_id)
+        return _value(connection, chat_id, 'chat', table)
+    chat, kinds = _object(connection, _q(CHAT_TOP, table), chat_id)
     if kinds.get('messages') == 'array':
-        listed = {index: _loads(data) for index, data in _stream(connection, LIST_ELEMENTS, (chat_id,))}
+        rows = _stream(connection, _q(LIST_ELEMENTS, table), (chat_id,))
+        listed = {index: _loads(data) for index, data in rows}
         chat['messages'] = [listed[index] for index in sorted(listed)]
     elif 'messages' in kinds:
-        chat['messages'] = _value(connection, chat_id, "chat->'messages'")
+        chat['messages'] = _value(connection, chat_id, "chat->'messages'", table)
     if kinds.get('history') == 'object':
-        history, history_kinds = _object(connection, HISTORY_TOP, chat_id)
+        history, history_kinds = _object(connection, _q(HISTORY_TOP, table), chat_id)
         if history_kinds.get('messages') == 'object':
-            history['messages'] = _read_messages(connection, chat_id)
+            history['messages'] = _read_messages(connection, chat_id, table)
         elif 'messages' in history_kinds:
-            history['messages'] = _value(connection, chat_id, "chat->'history'->'messages'")
+            history['messages'] = _value(connection, chat_id, "chat->'history'->'messages'", table)
         chat['history'] = history
     elif 'history' in kinds:
-        chat['history'] = _value(connection, chat_id, "chat->'history'")
+        chat['history'] = _value(connection, chat_id, "chat->'history'", table)
     return chat
 
 
-def _read_messages(connection, chat_id: str) -> dict:
+def _read_messages(connection, chat_id: str, table: str = 'chat') -> dict:
     messages: dict = {}
     arrays: dict = {}
-    for key, data in connection.execute(MESSAGE_ODD, (chat_id,)):
+    for key, data in connection.execute(_q(MESSAGE_ODD, table), (chat_id,)):
         messages[key] = _loads(data)
-    for message_key, field, value_kind, data in _stream(connection, MESSAGE_FIELDS, (chat_id,), itersize=64):
+    for message_key, field, value_kind, data in _stream(connection, _q(MESSAGE_FIELDS, table), (chat_id,), itersize=64):
         message = messages.setdefault(message_key, {})
         if data is None and field in ARRAY_FIELDS and value_kind == 'array':
             arrays[(message_key, field)] = {}
             message[field] = None
         else:
             message[field] = _loads(data)
-    for message_key, field, index, data in _stream(connection, MESSAGE_ELEMENTS, (chat_id,)):
+    for message_key, field, index, data in _stream(connection, _q(MESSAGE_ELEMENTS, table), (chat_id,)):
         _fill(arrays, message_key, field, index, data)
     for (message_key, field), elements in arrays.items():
         messages[message_key][field] = [elements[index] for index in sorted(elements)]
@@ -482,23 +500,43 @@ RAW_SIZES = """SELECT octet_length(convert_to(chat::text, 'UTF8')), coalesce((
                + coalesce(octet_length(convert_to(files::text, 'UTF8')), 0))
       FROM chat_message WHERE chat_id = %s), 0)
   FROM chat WHERE id = %s"""
+SHARED_CANDIDATES = 'SELECT id, pg_column_size(chat) FROM shared_chat WHERE pg_column_size(chat) > %s'
 
 
-def _candidates(connection, args) -> list[tuple[str, int, int]]:
-    """(chat id, stored chat bytes, stored row bytes), largest first. Stored sizes are compressed."""
+def _candidates(connection, args) -> list[tuple[str, str, int, int]]:
+    """(table, id, stored chat bytes, stored row bytes), largest first. Stored sizes are compressed.
+
+    Shared-chat snapshots copied an oversized chat whole before the bounds existed and never heal on their own.
+    """
     if args.chat_id:
         ids = list(dict.fromkeys(args.chat_id))
     else:
         min_bytes = int(args.min_mb * 1024 * 1024)
         ids = [row[0] for row in connection.execute(CANDIDATES, (min_bytes, min_bytes)).fetchall()]
-    found = connection.execute(STORED_SIZES, (ids,)).fetchall() if ids else []
+    found = [('chat', *row) for row in connection.execute(STORED_SIZES, (ids,)).fetchall()] if ids else []
     connection.commit()
-    return sorted(((i, int(c or 0), int(r or 0)) for i, c, r in found), key=lambda item: -(item[1] + item[2]))
+    if not args.chat_id:
+        try:
+            shared = connection.execute(SHARED_CANDIDATES, (int(args.min_mb * 1024 * 1024),)).fetchall()
+            found += [('shared_chat', shared_id, size, 0) for shared_id, size in shared]
+            connection.commit()
+        except Exception:  # an instance without shared snapshots
+            connection.rollback()
+    return sorted(
+        ((table, i, int(c or 0), int(r or 0)) for table, i, c, r in found), key=lambda item: -(item[2] + item[3])
+    )
 
 
-def _raw_sizes(connection, chat_id: str) -> tuple[int, int]:
+def _raw_sizes(connection, table: str, chat_id: str) -> tuple[int, int]:
     """Uncompressed UTF-8 bytes of the chat JSON and of its rows' output, sources and files."""
-    found = connection.execute(RAW_SIZES, (chat_id, chat_id)).fetchone()
+    if table == 'shared_chat':
+        query, params = (
+            "SELECT octet_length(convert_to(chat::text, 'UTF8')), 0 FROM shared_chat WHERE id = %s",
+            (chat_id,),
+        )
+    else:
+        query, params = RAW_SIZES, (chat_id, chat_id)
+    found = connection.execute(query, params).fetchone()
     connection.commit()
     return (int(found[0] or 0), int(found[1] or 0)) if found else (0, 0)
 
@@ -516,45 +554,46 @@ def _compaction_from_config(connection) -> bool:
     return bool(_loads(found[0])) if found else False
 
 
-def _droppable(connection, chat: dict) -> frozenset:
-    """Attachments over the inline limit whose file record holds text of its own (the app checks the same)."""
+def _droppable(connection, chat: dict, owner_id: str | None) -> dict:
+    """Attachments over the inline limit whose text a file record of the chat's owner holds: id -> text length."""
     ids = sorted(inline_file_ids(chat))
-    if not ids:
-        return frozenset()
+    if not ids or not owner_id:
+        return {}
     found = connection.execute(
-        "SELECT id FROM file WHERE id = ANY(%s) AND coalesce(length(data->>'content'), 0) > 0", (ids,)
+        "SELECT id, length(data->>'content') FROM file WHERE id = ANY(%s) AND user_id = %s", (ids, owner_id)
     ).fetchall()
-    return frozenset(row[0] for row in found)
+    return {file_id: size for file_id, size in found if size}
 
 
 class _Changed(Exception):
     pass
 
 
-def _check_unchanged(connection, chat_id: str, chat_md5: str, row_digests: dict[str, tuple]) -> None:
-    """Under the chat's row lock, raise _Changed unless the chat and the rows to change are as they were read."""
-    now = connection.execute(
-        "SELECT md5(convert_to(chat::text, 'UTF8')) FROM chat WHERE id = %s FOR UPDATE", (chat_id,)
-    ).fetchone()
-    if not now or now[0] != chat_md5:
-        raise _Changed()
-    if not row_digests:
-        return
-    current = connection.execute(
+class _CommitUnknown(Exception):
+    pass
+
+
+def _chat_md5(connection, table: str, chat_id: str, lock: bool) -> str | None:
+    query = "SELECT md5(convert_to(chat::text, 'UTF8')) FROM {table} WHERE id = %s" + (' FOR UPDATE' if lock else '')
+    found = connection.execute(_q(query, table), (chat_id,)).fetchone()
+    return found[0] if found else None
+
+
+def _row_md5s(connection, row_ids: list[str], lock: bool) -> dict[str, tuple]:
+    if not row_ids:
+        return {}
+    found = connection.execute(
         "SELECT id, md5(convert_to(output::text, 'UTF8')), md5(convert_to(sources::text, 'UTF8')), "
-        "md5(convert_to(files::text, 'UTF8')) FROM chat_message WHERE id = ANY(%s) FOR UPDATE",
-        (list(row_digests),),
+        "md5(convert_to(files::text, 'UTF8')) FROM chat_message WHERE id = ANY(%s)" + (' FOR UPDATE' if lock else ''),
+        (row_ids,),
     ).fetchall()
-    if len(current) != len(row_digests):
-        raise _Changed()
-    for row_id, *digests in current:
-        if tuple(value or NULL_MD5 for value in digests) != row_digests[row_id]:
-            raise _Changed()
+    return {row_id: tuple(value or NULL_MD5 for value in md5s) for row_id, *md5s in found}
 
 
 class _Plan:
-    def __init__(self, chat_id: str, chat_md5: str, chat_bytes: int, current_id: str | None):
-        self.chat_id, self.chat_md5, self.chat_bytes, self.current_id = chat_id, chat_md5, chat_bytes, current_id
+    def __init__(self, table: str, chat_id: str, chat_md5: str, chat_bytes: int, current_id, owner_id):
+        self.table, self.chat_id, self.chat_md5, self.chat_bytes = table, chat_id, chat_md5, chat_bytes
+        self.current_id, self.owner_id = current_id, owner_id
         self.bounded_text: bytes | None = None
         self.written_rows: dict[str, dict] = {}
         self.row_digests: dict[str, tuple] = {}
@@ -562,19 +601,30 @@ class _Plan:
 
     def manifest(self, run_id: str) -> dict:
         return {
+            'table': self.table,
             'chat_id': self.chat_id,
             'run_id': run_id,
             'created_at': int(time.time()),
             'current_message_id': self.current_id,
             'read': {'chat_md5': self.chat_md5},
             'written': {
-                'chat_md5': _md5(self.bounded_text) if self.bounded_text is not None else self.chat_md5,
+                # None: the repair left the chat JSON alone (rows only), so a restore leaves it alone too.
+                'chat_md5': _md5(self.bounded_text) if self.bounded_text is not None else None,
                 'rows': {
                     row_id: {key: _md5(value) for key, value in columns.items()}
                     for row_id, columns in self.written_rows.items()
                 },
             },
         }
+
+    def written_state(self) -> tuple[str | None, dict[str, tuple]]:
+        rows = {}
+        for row_id, columns in self.written_rows.items():
+            digests = list(self.row_digests[row_id])
+            for key, value in columns.items():
+                digests[ROW_COLUMNS.index(key)] = _md5(value)
+            rows[row_id] = tuple(digests)
+        return (_md5(self.bounded_text) if self.bounded_text is not None else self.chat_md5), rows
 
 
 def _plan_rows_of(connection, plan: _Plan, chat_plan: ChatPlan) -> int:
@@ -598,9 +648,12 @@ def _back_up(connection, args, run_id: str, plan: _Plan) -> Backup:
 
     backup = Backup(args.backup_dir, plan.chat_id, run_id)
     try:
-        chat_sql = sql.SQL("SELECT convert_to(chat::text, 'UTF8') FROM chat WHERE id = {}")
-        if backup.add(connection, {'kind': 'chat'}, chat_sql.format(sql.Literal(plan.chat_id))) != plan.chat_md5:
-            raise _Changed()
+        if plan.bounded_text is not None:
+            chat_sql = sql.SQL("SELECT convert_to(chat::text, 'UTF8') FROM {} WHERE id = {}").format(
+                sql.Identifier(plan.table), sql.Literal(plan.chat_id)
+            )
+            if backup.add(connection, {'kind': 'chat'}, chat_sql) != plan.chat_md5:
+                raise _Changed()
         for row_id, columns in plan.written_rows.items():
             for key in columns:
                 row_sql = sql.SQL("SELECT convert_to({}::text, 'UTF8') FROM chat_message WHERE id = {}")
@@ -612,31 +665,36 @@ def _back_up(connection, args, run_id: str, plan: _Plan) -> Backup:
         raise
 
 
-def _read_and_plan(connection, args, chat_id: str, run_id: str) -> tuple[str, _Plan | None]:
-    """Read and plan in one REPEATABLE READ snapshot without a lock; with --apply, back up from that snapshot."""
+def _read_and_plan(connection, args, table: str, chat_id: str, run_id: str) -> tuple[str, _Plan | None]:
+    """Read and plan in one REPEATABLE READ snapshot without a row lock; with --apply, back up from that snapshot."""
     with connection.transaction():
         # A backup stages values in a temporary table, which a READ ONLY transaction would refuse.
         mode = 'REPEATABLE READ' if args.apply else 'REPEATABLE READ, READ ONLY'
         connection.execute(f'SET TRANSACTION ISOLATION LEVEL {mode}')
         found = connection.execute(
-            "SELECT md5(convert_to(chat::text, 'UTF8')), octet_length(convert_to(chat::text, 'UTF8')), "
-            'current_message_id FROM chat WHERE id = %s',
+            _q(
+                "SELECT md5(convert_to(chat::text, 'UTF8')), octet_length(convert_to(chat::text, 'UTF8')), "
+                + ('current_message_id' if table == 'chat' else 'NULL')
+                + ', user_id FROM {table} WHERE id = %s',
+                table,
+            ),
             (chat_id,),
         ).fetchone()
         if not found:
             return 'unchanged', None
-        plan = _Plan(chat_id, *found)
-        chat = read_chat(connection, chat_id)
-        chat_plan = ChatPlan(chat, plan.current_id, _droppable(connection, chat))
+        plan = _Plan(table, chat_id, *found)
+        chat = read_chat(connection, chat_id, table)
+        droppable = _droppable(connection, chat, plan.owner_id) if table == 'chat' else {}
+        chat_plan = ChatPlan(chat, plan.current_id, droppable)
         plan.current_id = chat_plan.current_id
         del chat
         bounded_chat, chat_plan.bounded_chat = chat_plan.bounded_chat, None
         plan.bounded_text = _dumps(bounded_chat).encode() if bounded_chat is not None else None
         del bounded_chat
-        removed = _plan_rows_of(connection, plan, chat_plan)
+        removed = _plan_rows_of(connection, plan, chat_plan) if table == 'chat' else 0
         after_chat = len(plan.bounded_text) if plan.bounded_text is not None else plan.chat_bytes
         print(
-            f'{chat_id}: chat JSON {plan.chat_bytes / 1048576:.1f} -> {after_chat / 1048576:.1f} MB; '
+            f'{table} {chat_id}: JSON {plan.chat_bytes / 1048576:.1f} -> {after_chat / 1048576:.1f} MB; '
             f'chat_message saved texts -{removed / 1048576:.1f} M characters in {len(plan.written_rows)} rows',
             flush=True,
         )
@@ -649,12 +707,21 @@ def _read_and_plan(connection, args, chat_id: str, run_id: str) -> tuple[str, _P
 
 
 def _write(connection, plan: _Plan) -> None:
-    """Lock the chat briefly, check nothing changed since the snapshot, and write the bounded chat and rows."""
-    with connection.transaction():
-        _check_unchanged(connection, plan.chat_id, plan.chat_md5, plan.row_digests)
+    """Lock the chat briefly, check nothing changed since the snapshot, write, then commit as a separate step.
+
+    Raises _Changed or another error when nothing was written, and _CommitUnknown when the commit itself failed
+    (it may or may not have landed).
+    """
+    try:
+        if _chat_md5(connection, plan.table, plan.chat_id, lock=True) != plan.chat_md5:
+            raise _Changed()
+        current = _row_md5s(connection, list(plan.row_digests), lock=True)
+        if current != plan.row_digests:
+            raise _Changed()
         if plan.bounded_text is not None:
             connection.execute(
-                "UPDATE chat SET chat = convert_from(%b, 'UTF8')::json WHERE id = %s", (plan.bounded_text, plan.chat_id)
+                _q("UPDATE {table} SET chat = convert_from(%b, 'UTF8')::json WHERE id = %s", plan.table),
+                (plan.bounded_text, plan.chat_id),
             )
         for row_id, columns in plan.written_rows.items():
             assignments = ', '.join(
@@ -663,31 +730,69 @@ def _write(connection, plan: _Plan) -> None:
             )
             values = [value for value in columns.values() if value is not None]
             connection.execute(f'UPDATE chat_message SET {assignments} WHERE id = %s', (*values, row_id))
+    except BaseException:
+        connection.rollback()
+        raise
+    try:
+        connection.commit()
+    except BaseException as error:
+        raise _CommitUnknown(error) from error
 
 
-def _repair_one(connection, args, chat_id: str, run_id: str) -> str:
+def _landed(plan: _Plan) -> str:
+    """After an unknown commit outcome, on a fresh connection: 'written', 'original' or 'unknown'."""
+    try:
+        connection = _connect()
+        chat_md5 = _chat_md5(connection, plan.table, plan.chat_id, lock=False)
+        rows = _row_md5s(connection, list(plan.row_digests), lock=False)
+        connection.close()
+    except Exception:
+        return 'unknown'
+    written_chat, written_rows = plan.written_state()
+    if chat_md5 == written_chat and rows == written_rows:
+        return 'written'
+    if chat_md5 == plan.chat_md5 and rows == plan.row_digests:
+        return 'original'
+    return 'unknown'
+
+
+def _repair_one(connection, args, table: str, chat_id: str, run_id: str) -> str:
     """'shrunk', 'unchanged', 'would shrink' or 'changed' (skipped because it changed while being repaired)."""
     try:
-        outcome, plan = _read_and_plan(connection, args, chat_id, run_id)
+        outcome, plan = _read_and_plan(connection, args, table, chat_id, run_id)
         if plan is None:
             return outcome
         try:
             manifest_path = plan.backup.finish(plan.manifest(run_id))
-            _write(connection, plan)
         except BaseException:
             plan.backup.discard()
+            plan.backup.remove()
+            raise
+        try:
+            _write(connection, plan)
+        except _CommitUnknown:
+            state = _landed(plan)
+            if state == 'written':
+                print(f'{chat_id}: shrunk (its commit reported an error but landed); backup {manifest_path}')
+                return 'shrunk'
+            if state == 'original':
+                plan.backup.remove()
+            else:
+                print(f'{chat_id}: the commit outcome is unknown; its backup is kept: {manifest_path}', flush=True)
+            raise
+        except BaseException:
             plan.backup.remove()  # nothing was written, so the backup would only roll the chat back
             raise
-        print(f'{chat_id}: shrunk; backup {manifest_path}', flush=True)
+        print(f'{table} {chat_id}: shrunk; backup {manifest_path}', flush=True)
         return 'shrunk'
     except _Changed:
         print(f'{chat_id}: skipped, it changed while being repaired (run again)', flush=True)
         return 'changed'
 
 
-def _attempt(connection, args, chat_id: str, run_id: str):
+def _attempt(connection, args, table: str, chat_id: str, run_id: str):
     try:
-        return connection, _repair_one(connection, args, chat_id, run_id)
+        return connection, _repair_one(connection, args, table, chat_id, run_id)
     except Exception as error:  # reported and counted; the next chat is still tried
         try:
             connection.rollback()
@@ -707,15 +812,15 @@ def repair(args) -> int:
     run_id = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()) + f'-{os.getpid()}'
     candidates = _candidates(connection, args)
     print(
-        f'{len(candidates)} chats to check (stored above {args.min_mb} MB compressed); context compaction is '
-        f'{"on" if compaction else "off"}',
+        f'{len(candidates)} chats and shared snapshots to check (stored above {args.min_mb} MB compressed); '
+        f'context compaction is {"on" if compaction else "off"}',
         flush=True,
     )
     outcomes: dict[str, list[str]] = {}
-    for chat_id, chat_stored, rows_stored in candidates:
-        chat_raw, rows_raw = _raw_sizes(connection, chat_id)
+    for table, chat_id, chat_stored, rows_stored in candidates:
+        chat_raw, rows_raw = _raw_sizes(connection, table, chat_id)
         print(
-            f'{chat_id}: chat JSON {chat_raw / 1048576:.1f} MB and rows {rows_raw / 1048576:.1f} MB '
+            f'{table} {chat_id}: JSON {chat_raw / 1048576:.1f} MB and rows {rows_raw / 1048576:.1f} MB '
             f'({(chat_stored + rows_stored) / 1048576:.1f} MB stored)',
             flush=True,
         )
@@ -726,7 +831,7 @@ def repair(args) -> int:
         if args.sizes_only:
             outcomes.setdefault('listed', []).append(chat_id)
             continue
-        connection, outcome = _attempt(connection, args, chat_id, run_id)
+        connection, outcome = _attempt(connection, args, table, chat_id, run_id)
         outcomes.setdefault(outcome, []).append(chat_id)
     summary = ', '.join(f'{len(ids)} {name}' for name, ids in sorted(outcomes.items())) or 'nothing to do'
     print(f'summary: {summary}', flush=True)
@@ -782,46 +887,31 @@ def _stage(connection, manifest: dict, path: str) -> None:
         copy.write(struct.pack('!h', -1))
 
 
-def _current(connection, manifest: dict) -> tuple[str, list] | None:
-    """Under the chat's lock: the chat's md5 and the md5s of the backed-up row columns; None when it is gone."""
-    now = connection.execute(
-        "SELECT md5(convert_to(chat::text, 'UTF8')) FROM chat WHERE id = %s FOR UPDATE", (manifest['chat_id'],)
-    ).fetchone()
-    if not now:
-        return None
-    rows = []
-    for row_id, columns in manifest['written']['rows'].items():
-        if any(key not in ROW_COLUMNS for key in columns):
-            raise SystemExit(f'unexpected columns in the manifest for {row_id}')
-        found = connection.execute(
-            'SELECT '
-            + ', '.join(f"md5(convert_to({key}::text, 'UTF8'))" for key in columns)
-            + ' FROM chat_message WHERE id = %s FOR UPDATE',
-            (row_id,),
-        ).fetchone()
-        rows.append([value or NULL_MD5 for value in found] if found else None)
-    return now[0], rows
+def _restore_state(manifest: dict, chat_md5: str, rows: dict[str, tuple]) -> tuple[str, list[str]]:
+    """'written' (as the repair left it), 'original' (already as backed up) or 'drift' (changed since), with details.
 
-
-def _restore_state(manifest: dict, current: tuple[str, list]) -> tuple[str, list[str]]:
-    """'written' (as the repair left it), 'original' (already as backed up) or 'drift' (changed since), with details."""
-    chat_md5, rows = current
+    A rows-only repair never touched the chat JSON, so later activity in the chat JSON does not count as drift.
+    """
     written = manifest['written']
     originals = {(s['id'], s['column']): s['md5'] for s in manifest['sections'] if s['kind'] == 'row'}
-    drift, original = [], chat_md5 == manifest['read']['chat_md5']
-    if chat_md5 != written['chat_md5']:
-        drift.append('the chat JSON')
-    for (row_id, columns), now in zip(written['rows'].items(), rows):
-        if now != list(columns.values()):
+    drift, original = [], True
+    if written['chat_md5'] is not None:
+        if chat_md5 != written['chat_md5']:
+            drift.append('the chat JSON')
+        original = chat_md5 == manifest['read']['chat_md5']
+    for row_id, columns in written['rows'].items():
+        now = rows.get(row_id)
+        current = [now[ROW_COLUMNS.index(key)] for key in columns] if now else None
+        if current != list(columns.values()):
             drift.append(f'row {row_id}')
-        if now != [originals.get((row_id, key)) for key in columns]:
+        if current != [originals.get((row_id, key)) for key in columns]:
             original = False
     if not drift:
         return 'written', []
     return ('original', drift) if original else ('drift', drift)
 
 
-def _write_staged(connection, manifest: dict) -> list[str]:
+def _write_staged(connection, manifest: dict, table: str) -> list[str]:
     """Write every staged section back; return the ids that were not found."""
     missing = []
     for number, section in enumerate(manifest['sections']):
@@ -830,7 +920,8 @@ def _write_staged(connection, manifest: dict) -> list[str]:
         else:
             value, params = "convert_from((SELECT v FROM chat_bounds_restore WHERE n = %s), 'UTF8')::json", (number,)
         if section['kind'] == 'chat':
-            result = connection.execute(f'UPDATE chat SET chat = {value} WHERE id = %s', (*params, manifest['chat_id']))
+            query = _q(f'UPDATE {{table}} SET chat = {value} WHERE id = %s', table)
+            result = connection.execute(query, (*params, manifest['chat_id']))
         else:
             result = connection.execute(
                 f'UPDATE chat_message SET {section["column"]} = {value} WHERE id = %s', (*params, section['id'])
@@ -845,15 +936,16 @@ def restore(path: str, force: bool) -> int:
         manifest = json.load(handle)
     if manifest.get('format') != FORMAT:
         raise SystemExit(f'{path} is not a {FORMAT} manifest')
-    chat_id = manifest['chat_id']
+    chat_id, table = manifest['chat_id'], manifest.get('table', 'chat')
     connection = _connect()
     with connection.transaction():
         _stage(connection, manifest, path)  # before any lock: the chat is locked only to check and write
-        current = _current(connection, manifest)
-        if current is None:
+        chat_md5 = _chat_md5(connection, table, chat_id, lock=True)
+        if chat_md5 is None:
             print(f'{chat_id}: the chat no longer exists; nothing restored')
             return 1
-        state, drift = _restore_state(manifest, current)
+        rows = _row_md5s(connection, list(manifest['written']['rows']), lock=True)
+        state, drift = _restore_state(manifest, chat_md5, rows)
         if state == 'original':
             print(f'{chat_id}: already as backed up (the repair was not applied or was restored); nothing to do')
             return 0
@@ -863,9 +955,9 @@ def restore(path: str, force: bool) -> int:
                 'newer work. Use --force to overwrite anyway.'
             )
             return 1
-        missing = _write_staged(connection, manifest)
-    rows = len(manifest['written']['rows'])
-    print(f'restored {chat_id} and {rows} chat_message rows' + (' (forced)' if drift else ''))
+        missing = _write_staged(connection, manifest, table)
+    rows_count = len(manifest['written']['rows'])
+    print(f'restored {chat_id} and {rows_count} chat_message rows' + (' (forced)' if drift else ''))
     if missing:
         print(f'not found while restoring: {" ".join(sorted(set(missing)))}')
         return 1

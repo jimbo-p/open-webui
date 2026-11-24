@@ -29,7 +29,7 @@ def small_limits(monkeypatch):
         'CHAT_MESSAGE_SOURCES_MAX_CHARS': 25_000,
         'CHAT_INLINE_FILE_CONTENT_MAX_CHARS': 5_000,
         'CHAT_STORED_BULK_MAX_CHARS': 1_000_000,
-        'CHAT_BOUND_PROTECTED_MESSAGES': 2,
+        'CHAT_BOUND_PROTECTED_TURNS': 1,
         'CHAT_TRIM_PREVIEW_MIN_CHARS': 10_000,
         'CHAT_TRIM_OLD_PREVIEW_CHARS': 1_000,
     }.items():
@@ -84,10 +84,16 @@ def seed(connection, chat_id='big', turns=6, size=300_000):
     messages, parent = {}, None
     for index in range(turns):
         user_id, reply_id = f'u{index}', f'a{index}'
-        messages[user_id] = {'id': user_id, 'parentId': parent, 'childrenIds': [reply_id], 'role': 'user'}
+        messages[user_id] = {
+            'id': user_id,
+            'parentId': parent,
+            'childrenIds': [reply_id],
+            'role': 'user',
+            'timestamp': 2 * index + 1,
+        }
         if parent:
             messages[parent]['childrenIds'] = [user_id]
-        messages[reply_id] = tool_message(reply_id, [size], parent=user_id)
+        messages[reply_id] = {**tool_message(reply_id, [size], parent=user_id), 'timestamp': 2 * index + 2}
         parent = reply_id
     chat = {'title': 'T', 'history': {'messages': messages, 'currentId': parent}, 'messages': list(messages.values())}
     text = json.dumps(chat, ensure_ascii=False, indent=1)  # not the compact form the repair writes
@@ -99,7 +105,14 @@ def seed(connection, chat_id='big', turns=6, size=300_000):
         connection.execute(
             'INSERT INTO chat_message (id, chat_id, role, parent_id, output, created_at) VALUES (%s, %s, %s, %s, '
             '%s::json, %s)',
-            (f'{chat_id}-{message_id}', chat_id, message['role'], message.get('parentId'), output, 1),
+            (
+                f'{chat_id}-{message_id}',
+                chat_id,
+                message['role'],
+                message.get('parentId'),
+                output,
+                message['timestamp'],
+            ),
         )
     return text
 
@@ -221,7 +234,7 @@ def test_sizes_only_lists_without_reading_the_chats(small_limits, database, tmp_
     original = seed(database)
     monkeypatch.setattr(chat_bounds_repair, 'read_chat', lambda *args: pytest.fail('read during --sizes-only'))
     assert run('--min-mb', '0', '--sizes-only') == 0
-    assert chat_text(database) == original and 'chat JSON' in capsys.readouterr().out
+    assert chat_text(database) == original and 'big: JSON' in capsys.readouterr().out
 
 
 def test_rows_get_the_chat_decisions_with_a_stale_current_id_and_a_missing_row(small_limits, database, tmp_path):
@@ -259,18 +272,93 @@ def test_the_repair_reads_whether_compaction_is_on(small_limits, database, capsy
     assert 'context compaction is on' in capsys.readouterr().out
 
 
-def test_attachment_text_is_dropped_only_where_this_instance_holds_the_file(small_limits, database, tmp_path):
-    database.execute('CREATE TABLE file (id text primary key, data json)')
-    database.execute("""INSERT INTO file VALUES ('here', '{"content": "kept in the record"}')""")
+def test_attachment_text_is_dropped_only_where_the_owner_holds_the_same_file(small_limits, database, tmp_path):
+    database.execute('CREATE TABLE file (id text primary key, user_id text, data json)')
+    text = 'x' * 6_000
+    for file_id, owner in (('here', 'owner'), ('theirs', 'someone-else')):
+        database.execute('INSERT INTO file VALUES (%s, %s, %s::json)', (file_id, owner, json.dumps({'content': text})))
     seed(database)
     chat = json.loads(chat_text(database))
     chat['history']['messages']['u0']['files'] = [
-        {'type': 'file', 'id': file_id, 'file': {'data': {'content': 'x' * 6_000}}} for file_id in ('here', 'gone')
+        {'type': 'file', 'id': file_id, 'file': {'data': {'content': text}}} for file_id in ('here', 'theirs', 'gone')
     ]
     database.execute("UPDATE chat SET chat = %s::json WHERE id = 'big'", (json.dumps(chat),))
     assert run('--min-mb', '0', '--apply', '--backup-dir', str(tmp_path)) == 0
-    here, gone = json.loads(chat_text(database))['history']['messages']['u0']['files']
-    assert 'content' not in here['file']['data'] and gone['file']['data']['content'] == 'x' * 6_000
+    here, theirs, gone = json.loads(chat_text(database))['history']['messages']['u0']['files']
+    assert 'content' not in here['file']['data']
+    assert theirs['file']['data']['content'] == text and gone['file']['data']['content'] == text
+
+
+def shared_snapshot(connection, text):
+    connection.execute(
+        'CREATE TABLE IF NOT EXISTS shared_chat (id text primary key, chat_id text, user_id text, title text, '
+        'chat json, created_at bigint, updated_at bigint)'
+    )
+    connection.execute("INSERT INTO shared_chat VALUES ('share-1', 'big', 'owner', 'T', %s::json, 0, 0)", (text,))
+
+
+def test_shared_snapshots_are_listed_repaired_and_restorable(small_limits, database, tmp_path, capsys):
+    original = seed(database)
+    shared_snapshot(database, original)
+    assert run('--min-mb', '0', '--sizes-only') == 0
+    assert 'shared_chat share-1' in capsys.readouterr().out
+    assert run('--min-mb', '0', '--apply', '--backup-dir', str(tmp_path)) == 0
+    snapshot = database.execute("SELECT chat::text FROM shared_chat WHERE id = 'share-1'").fetchone()[0]
+    assert len(snapshot) < len(original) / 2
+    [manifest] = [path for path in tmp_path.glob('share-1-*.manifest.json')]
+    assert run('--restore', str(manifest)) == 0
+    assert database.execute("SELECT chat::text FROM shared_chat WHERE id = 'share-1'").fetchone()[0] == original
+
+
+def test_a_rows_only_repair_restores_without_touching_newer_chat_json(small_limits, database, tmp_path):
+    seed(database)
+    database.execute("UPDATE chat SET chat = %s::json WHERE id = 'big'", (json.dumps({'title': 'T'}),))
+    original_row = row_text(database, 'big-a0')
+    assert run('--min-mb', '0', '--apply', '--backup-dir', str(tmp_path)) == 0
+    assert len(row_text(database, 'big-a0')) < len(original_row)
+    database.execute("UPDATE chat SET chat = %s::json WHERE id = 'big'", (json.dumps({'title': 'Renamed later'}),))
+    [manifest] = list(tmp_path.glob('*.manifest.json'))
+    assert run('--restore', str(manifest)) == 0  # the chat JSON was never part of this repair
+    assert row_text(database, 'big-a0') == original_row
+    assert json.loads(chat_text(database)) == {'title': 'Renamed later'}
+
+
+class FlakyCommit:
+    """A connection whose commit after an UPDATE fails, after (landed=True) or instead of committing."""
+
+    def __init__(self, inner, landed):
+        self.inner, self.landed, self.updated = inner, landed, False
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    def execute(self, query, *args, **kwargs):
+        if str(query).lstrip().upper().startswith('UPDATE'):
+            self.updated = True
+        return self.inner.execute(query, *args, **kwargs)
+
+    def commit(self):
+        if self.updated:
+            self.updated = False
+            if self.landed:
+                self.inner.commit()
+            raise RuntimeError('connection lost while committing')
+        return self.inner.commit()
+
+
+@pytest.mark.parametrize('landed', [True, False])
+def test_an_unknown_commit_outcome_is_checked_before_the_backup_is_removed(
+    small_limits, database, tmp_path, monkeypatch, landed
+):
+    original = seed(database)
+    real_connect = chat_bounds_repair._connect
+    monkeypatch.setattr(chat_bounds_repair, '_connect', lambda: FlakyCommit(real_connect(), landed))
+    code = run('--min-mb', '0', '--apply', '--backup-dir', str(tmp_path))
+    manifests = list(tmp_path.glob('*.manifest.json'))
+    if landed:
+        assert code == 0 and len(manifests) == 1 and chat_text(database) != original
+    else:
+        assert code == 1 and manifests == [] and chat_text(database) == original
 
 
 def test_a_concurrent_writer_waits_only_briefly(small_limits, database, tmp_path):
