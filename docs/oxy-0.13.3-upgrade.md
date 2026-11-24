@@ -40,6 +40,62 @@ Regressions are in `test/backend/test_context_manifests.py`,
 `test/backend/test_tool_result_limits.py` and
 `test/backend/test_tool_server_reads.py`.
 
+## Saved-chat bounds
+
+Added on November 24, 2026 after one of two identical ~887 MB chats took a
+16 GB production task out of memory. A chat is loaded and saved whole on every
+turn and every open, from the `chat` JSON and the `chat_message` rows. In
+production, 1,993 chats were above 1 MB stored (compressed) and 65 above
+10 MB; chats above 1 MB updated per week rose from about 120-150 in October
+to 229-370 in November. In the 40 largest chats, saved tool results
+(`function_call_output`) held 2.07 GB, citation documents (`sources`) 1.28 GB,
+and file text copied into `files` 0.18 GB, against 29 MB of message text. In
+the last 14 days, 429 messages saved more than 512 KB (compressed) of tool
+results, mostly many medium results in long tool loops rather than one huge
+one.
+
+`utils/chat_bounds.py` bounds only saved copies of tool results, citation
+excerpts and file text copied into a message; what people type and what models
+write is never changed. A shortened text keeps its start and end with a note
+saying how much was removed, and the bounds are stable on their own output, so
+the frontend saving back what it was served changes nothing.
+
+- Per message: all tool results together keep at most
+  `CHAT_MESSAGE_TOOL_OUTPUT_MAX_CHARS` (8,000,000) characters, the largest
+  shortened first, each to at least `CHAT_TRIM_PREVIEW_MIN_CHARS` (20,000).
+  A citation excerpt keeps `CHAT_SOURCE_DOCUMENT_MAX_CHARS` (100,000) and a
+  message's excerpts `CHAT_MESSAGE_SOURCES_MAX_CHARS` (2,000,000); citations
+  are only shown, never sent to the model. A file attachment's copied text
+  above `CHAT_INLINE_FILE_CONTENT_MAX_CHARS` (1,000,000) is dropped from the
+  message; retrieval then reads it from the file record, as it does for every
+  file without inline text.
+- Per chat: tool results and citation excerpts together keep at most
+  `CHAT_STORED_BULK_MAX_CHARS` (16,000,000) characters, about four times the
+  largest model context. The newest `CHAT_BOUND_PROTECTED_MESSAGES` (4)
+  messages of the current branch, any reply still being written and the
+  message being saved are never shortened for this. Copies the model no longer
+  reads (other branches, and messages before the latest compaction checkpoint)
+  go first, then older replayed copies: largest first to a 20,000-character
+  preview, then oldest first to `CHAT_TRIM_OLD_PREVIEW_CHARS` (2,000), and,
+  only when a chat holds thousands of results, the oldest to a short note.
+- Where: `ChatModel` and `ChatResponse` bound the chat they carry, so every
+  open, export and share is bounded; message saves (`upsert_message_to_chat_by_id_and_message_id`,
+  `update_chat_by_id`, `edit_message_output`) bound what they store and write
+  any older message shortened for the chat budget to its `chat_message` row;
+  `chat_message` writes and the replay map (`get_messages_map_by_chat_id`)
+  bound each message; share snapshots copy the bounded chat. The stored format
+  is unchanged, so rolling back the image needs nothing else.
+- Existing chats heal the next time they are saved. The first load of a chat
+  saved before the bounds still costs what it did, so
+  `python -m open_webui.utils.chat_bounds_repair` shrinks them ahead of time:
+  a dry run by default (ids and sizes only), `--apply --backup-dir DIR` writes
+  each original chat and changed row to a gzip backup before rewriting it
+  under its row lock, `--restore FILE` puts one back, and `updated_at` is left
+  alone.
+- `CHAT_STORAGE_BOUNDS=false` turns all of it off.
+
+Regressions are in `test/backend/test_chat_bounds.py`.
+
 ## Built-in tool editor inheritance correction
 
 On November 11, 2026, the user approved the narrow frontend correction, dev

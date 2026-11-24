@@ -349,3 +349,29 @@ async def test_the_frontend_saving_a_whole_chat_back_stays_bounded(small_limits,
         part['text'] for item in rows['a0'].output if item['type'] == 'function_call_output' for part in item['output']
     ]
     assert row_texts == output_texts(chat['history']['messages']['a0'])
+
+
+def test_the_one_off_repair_plans_the_same_bounds_for_both_stores(small_limits):
+    from open_webui.utils.chat_bounds_repair import plan, rows_to_messages
+
+    messages = {
+        'u0': {'id': 'u0', 'parentId': None, 'childrenIds': ['a0'], 'role': 'user', 'content': 'q'},
+        'a0': tool_message('a0', [5_000, 5_000], parent='u0'),
+    }
+    chat = {'title': 'T', 'history': {'messages': messages, 'currentId': 'a0'}}
+    rows = [
+        ('c-u0', None, 'user', None, None, None, None, 1),
+        ('c-a0', 'u0', 'assistant', json.dumps(messages['a0']['output']), None, None, None, 2),
+    ]
+    row_messages = rows_to_messages('c', rows)
+    assert set(row_messages) == {'u0', 'a0'} and row_messages['a0']['parentId'] == 'u0'
+    bounded_chat, row_updates = plan(chat, row_messages, 'a0')
+    assert bounded_chat['history']['messages']['a0']['output'] == row_updates['a0']['output']
+    assert set(row_updates) == {'a0'} and set(row_updates['a0']) == {'output'}
+    assert plan(
+        bounded_chat,
+        rows_to_messages(
+            'c', [('c-a0', 'u0', 'assistant', json.dumps(row_updates['a0']['output']), None, None, None, 2)]
+        ),
+        'a0',
+    ) == (None, {})
