@@ -190,6 +190,23 @@ logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
 
 
+STREAM_TIMEOUT_MESSAGE = 'The model stopped responding before the answer finished (timeout). Please try again.'
+
+
+def message_error_content(error):
+    """Text stored and shown for a failed turn; never empty, since a bare timeout has no text."""
+    if isinstance(error, HTTPException):
+        error = error.detail
+    elif isinstance(error, dict):
+        error = error.get('detail', error)
+    elif isinstance(error, asyncio.TimeoutError) and not str(error):
+        error = STREAM_TIMEOUT_MESSAGE
+    else:
+        error = str(error) or type(error).__name__
+
+    return error if isinstance(error, (str, dict)) else str(error)
+
+
 def _is_tool_result_error(value: Any) -> bool:
     if isinstance(value, str):
         text = value.strip().lower()
@@ -4759,14 +4776,7 @@ async def streaming_chat_response_handler(response, ctx):
                     stream_size = 0
 
             def get_message_error_content(error):
-                if isinstance(error, HTTPException):
-                    error = error.detail
-                elif isinstance(error, dict):
-                    error = error.get('detail', error)
-                else:
-                    error = str(error)
-
-                return error if isinstance(error, (str, dict)) else str(error)
+                return message_error_content(error)
 
             async def emit_message_error(error_content):
                 if save_to_chat:
