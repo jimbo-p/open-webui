@@ -26,6 +26,8 @@ from open_webui.utils.chat_bounds import (
     bound_chat_with_changes,
     bound_message,
     bounded_fields,
+    inline_file_ids,
+    keep_saved_shortening,
 )
 from open_webui.utils.misc import get_output_text, sanitize_data_for_db, sanitize_text_for_db
 from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
@@ -523,6 +525,25 @@ class ChatTable:
             )
 
     @staticmethod
+    async def _droppable_files(session, chat: dict) -> frozenset:
+        """Attachments whose copied text is over the inline limit and whose file record holds text of its own."""
+        ids = inline_file_ids(chat)
+        if not ids:
+            return frozenset()
+        from open_webui.models.files import File
+
+        rows = (await session.execute(select(File.id, File.data).where(File.id.in_(ids)))).all()
+        return frozenset(
+            file_id
+            for file_id, data in rows
+            if isinstance(data, dict) and isinstance(data.get('content'), str) and data['content']
+        )
+
+    async def _drop_checked_files(self, session, chat: dict) -> dict:
+        droppable = await self._droppable_files(session, chat)
+        return bound_chat(chat, droppable_files=droppable) if droppable else chat
+
+    @staticmethod
     async def _sync_bounded_rows(session, chat_id: str, owner_id: str, messages: dict, message_ids: set[str]) -> None:
         """Write the bounded columns of messages shortened for the chat budget to their existing chat_message rows.
 
@@ -737,6 +758,8 @@ class ChatTable:
                 }
             )
 
+            # Attachment text the file records already hold is dropped too (checked here; the model cannot).
+            chat.chat = await self._drop_checked_files(session, chat.chat)
             chat_item = Chat(**chat.model_dump())
             session.add(chat_item)
             await session.commit()
@@ -869,6 +892,8 @@ class ChatTable:
 
             for form_data in chat_import_forms:
                 chat = self._chat_import_form_to_chat_model(user_id, form_data)
+                # An imported attachment's text is kept unless this instance's file record holds it.
+                chat.chat = await self._drop_checked_files(session, chat.chat)
                 chats.append(Chat(**chat.model_dump()))
 
             session.add_all(chats)
@@ -931,8 +956,18 @@ class ChatTable:
                         ):
                             updated['history']['messages'][mid] = message
                     updated['history'] = self.merge_history(updated['history'], {})
+                    # A client posting back the full copy of a text the bounds had shortened keeps the shortened one.
+                    merged = updated['history'].get('messages') or {}
+                    for mid in (chat['history'] or {}).get('messages') or {}:
+                        if mid in merged:
+                            merged[mid] = keep_saved_shortening(
+                                (stored.get('history', {}).get('messages') or {}).get(mid), merged[mid]
+                            )
 
-                updated, bounded_ids = bound_chat_with_changes(self._clean_null_bytes(updated))
+                updated = self._clean_null_bytes(updated)
+                updated, bounded_ids = bound_chat_with_changes(
+                    updated, droppable_files=await self._droppable_files(session, updated)
+                )
                 chat_item.chat = updated
                 chat_item.title = updated.get('title', 'New Chat')
                 if any(key in chat for key in ('history', 'messages', 'currentId', 'branchPointMessageId')):
@@ -1468,7 +1503,9 @@ class ChatTable:
                 self.upsert_message_to_history(history, message_id, bound_message(message))
                 chat['history'] = history
                 # Keep the whole chat within its budget; the message being saved only gets its own bounds.
-                chat, changed = bound_chat_with_changes(chat, keep={message_id})
+                chat, changed = bound_chat_with_changes(
+                    chat, keep={message_id}, droppable_files=await self._droppable_files(session, chat)
+                )
                 history = chat['history']
                 saved_message = history['messages'][message_id]
                 await ChatMessages.upsert_message(

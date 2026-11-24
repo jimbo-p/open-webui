@@ -16,6 +16,7 @@ from open_webui import env
 from open_webui.models import chat_messages, chats
 from open_webui.models.chat_messages import ChatMessage, ChatMessages
 from open_webui.models.chats import Chat, ChatForm, ChatImportForm, ChatModel, Chats
+from open_webui.models.files import File
 from open_webui.utils import chat_bounds, middleware
 from open_webui.utils.chat_bounds import bound_chat, bound_message, bound_messages_map, shorten
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -66,14 +67,20 @@ def tool_message(message_id, sizes, parent=None, role='assistant', **extra):
 
 
 def chain(count, sizes, *, prefix=''):
-    """A linear chat of ``count`` turns, each reply with tool results of ``sizes``."""
+    """A linear chat of ``count`` turns, each reply with tool results of ``sizes``, timestamps in order."""
     messages, parent = {}, None
     for index in range(count):
         user_id, reply_id = f'{prefix}u{index}', f'{prefix}a{index}'
-        messages[user_id] = {'id': user_id, 'parentId': parent, 'childrenIds': [reply_id], 'role': 'user'}
+        messages[user_id] = {
+            'id': user_id,
+            'parentId': parent,
+            'childrenIds': [reply_id],
+            'role': 'user',
+            'timestamp': 2 * index + 1,
+        }
         if parent:
             messages[parent]['childrenIds'] = [user_id]
-        messages[reply_id] = tool_message(reply_id, sizes, parent=user_id)
+        messages[reply_id] = tool_message(reply_id, sizes, parent=user_id, timestamp=2 * index + 2)
         parent = reply_id
     return messages
 
@@ -118,7 +125,9 @@ def test_shortening_again_keeps_the_original_length_and_the_removal_note_is_neut
     removed = shorten(twice, 0)
     assert removed.startswith('[Saved copy removed: this tool result (60,000 characters)')
     assert 'old' not in removed and chat_bounds.has_bound_note(removed)
+    assert 'Run the tool again' not in twice + removed  # no instruction to repeat a tool with side effects
     assert not chat_bounds.has_bound_note('An ordinary result.')
+    assert not chat_bounds.has_bound_note('A skill that quotes the marker [Saved copy shortened: here].')
 
 
 def test_messages_within_their_limits_are_returned_as_they_are(small_limits):
@@ -197,9 +206,11 @@ def test_citation_excerpts_and_copied_file_text_are_bounded_but_what_people_type
             {'source': file_item, 'document': ['short'], 'metadata': [{}]},
         ],
     }
-    bounded = bound_message(message)
+    assert bound_message(message)['files'][0] == message['files'][0]  # nobody checked the file record holds it
+    bounded = bound_message(message, droppable_files={'f1'})
     assert bounded['content'] == message['content']
     assert 'content' not in bounded['files'][0]['file']['data']  # read from the file record instead
+    assert bounded['files'][0]['file']['data'][chat_bounds.OMITTED_MARK] is True
     assert bounded['files'][0]['file']['meta'] == {'name': 'a.pdf'}
     assert bounded['files'][1] == message['files'][1]  # pasted text has no other copy
     document, small = bounded['sources'][0]['document']
@@ -207,8 +218,25 @@ def test_citation_excerpts_and_copied_file_text_are_bounded_but_what_people_type
     assert 'content' not in bounded['sources'][1]['source']['file']['data']  # the citation's copy of the file
     assert message['sources'][1]['source']['file']['data']['content'] == 'x' * 1_500
     chat = {'title': 'T', 'files': [copy.deepcopy(message['files'][0])], 'history': {'messages': {}}}
-    assert 'content' not in bound_chat(chat)['files'][0]['file']['data']
+    assert bound_chat(chat) is chat
+    assert 'content' not in bound_chat(chat, droppable_files={'f1'})['files'][0]['file']['data']
     assert chat['files'][0]['file']['data']['content'] == 'x' * 900
+
+
+def test_a_web_page_copied_into_every_citation_is_dropped_there_but_kept_as_the_attachment(small_limits):
+    page = {
+        'type': 'text',
+        'name': 'https://example.invalid',
+        'context': 'full',
+        'file': {'data': {'content': 'p' * 1_500}},
+    }
+    message = tool_message('a', [100])
+    message['sources'] = [{'source': copy.deepcopy(page), 'document': ['excerpt'], 'metadata': [{}]}]
+    bounded = bound_message(message)
+    assert 'content' not in bounded['sources'][0]['source']['file']['data']
+    assert bounded['sources'][0]['document'] == ['excerpt']
+    user = {'id': 'u', 'role': 'user', 'content': 'q', 'files': [page]}
+    assert bound_message(user) is user  # the attachment itself has no other copy
 
 
 def test_request_files_are_deduplicated_by_id_even_when_one_copy_lost_its_text():
@@ -222,11 +250,11 @@ def test_request_files_are_deduplicated_by_id_even_when_one_copy_lost_its_text()
 
 def test_a_chat_over_budget_shortens_what_the_model_no_longer_reads_first(small_limits):
     messages = {
-        'u1': {'id': 'u1', 'parentId': None, 'childrenIds': ['old', 'a1'], 'role': 'user', 'content': 'q1'},
-        'old': tool_message('old', [3_500], parent='u1'),  # a regenerated reply on another branch
-        'a1': tool_message('a1', [3_500], parent='u1', childrenIds=['u2']),
-        'u2': {'id': 'u2', 'parentId': 'a1', 'childrenIds': ['a2'], 'role': 'user', 'content': 'q2'},
-        'a2': tool_message('a2', [3_500], parent='u2'),
+        'u1': {'id': 'u1', 'parentId': None, 'childrenIds': ['old', 'a1'], 'role': 'user', 'timestamp': 1},
+        'old': tool_message('old', [3_500], parent='u1', timestamp=2),  # the reply before a regeneration
+        'a1': tool_message('a1', [3_500], parent='u1', childrenIds=['u2'], timestamp=3),
+        'u2': {'id': 'u2', 'parentId': 'a1', 'childrenIds': ['a2'], 'role': 'user', 'timestamp': 4},
+        'a2': tool_message('a2', [3_500], parent='u2', timestamp=5),
     }
     bounded, changed = bound_messages_map(messages, 'a2')
     assert 'old' in changed and bounded['a2'] is messages['a2']
@@ -261,19 +289,18 @@ def test_other_replies_to_the_newest_prompt_are_protected(small_limits):
 
 def test_every_tier_gets_the_preview_pass_before_any_copy_is_cut_further(small_limits):
     messages = chain(4, [3_500])
-    messages['u1']['childrenIds'].append('b1')
-    messages['b1'] = tool_message('b1', [3_500], parent='u1')  # an older regeneration, off the current branch
+    messages['u1']['childrenIds'].insert(0, 'b1')
+    messages['b1'] = tool_message('b1', [3_500], parent='u1', timestamp=3.5)  # an older regeneration
     bounded, changed = bound_messages_map(messages, 'a3')
-    assert bulk(bounded) <= 7_500
+    assert bulk(bounded) <= 10_000
     assert not any(text.startswith('[Saved copy removed') for m in bounded.values() for text in output_texts(m))
-    assert all(len(output_texts(bounded[key])[0]) >= 900 for key in ('a0', 'a1', 'a2'))  # the preview, not less
-    assert len(output_texts(bounded['b1'])[0]) <= 300
+    assert all(len(output_texts(bounded[key])[0]) >= 900 for key in ('a0', 'a1', 'a2', 'b1'))  # previews, no less
 
 
 def test_a_long_chat_of_many_medium_results_shortens_its_oldest_first(small_limits):
     messages = chain(20, [990, 990])  # each result below the 1,000-character preview
     bounded, changed = bound_messages_map(messages, 'a19')
-    assert bulk(bounded) <= 7_500
+    assert bulk(bounded) <= 10_000  # notes only as far as the budget itself needs
     assert output_texts(bounded['a0'])[0].startswith('[Saved copy removed: this tool result (997 characters)')
     assert 'Saved copy shortened' in output_texts(bounded['a18'])[0]
     assert bounded['a19'] is messages['a19']  # the newest stays whole
@@ -283,9 +310,9 @@ def test_a_long_chat_of_many_medium_results_shortens_its_oldest_first(small_limi
 def test_a_chat_that_fits_after_short_previews_keeps_its_newer_results_whole(small_limits):
     messages = chain(6, [990, 990])
     bounded, changed = bound_messages_map(messages, 'a5')
-    assert bulk(bounded) <= 7_500
-    assert changed == {'a0', 'a1', 'a2', 'a3'}  # oldest first, and only as far as needed
-    assert bounded['a4'] is messages['a4'] and bounded['a5'] is messages['a5']
+    assert bulk(bounded) <= 10_000
+    assert changed == {'a0', 'a1'}  # oldest first, and only as far as needed
+    assert all(bounded[f'a{index}'] is messages[f'a{index}'] for index in range(2, 6))
 
 
 def test_steady_growth_does_not_reshorten_the_chat_on_every_save(small_limits):
@@ -299,7 +326,7 @@ def test_steady_growth_does_not_reshorten_the_chat_on_every_save(small_limits):
     assert bound_messages_map(grown, 'a4') == (grown, set())  # still under the budget: nothing is rewritten
     grown['a4'] = tool_message('a4', [3_500], parent='u4')
     regrown, changed = bound_messages_map(grown, 'a4')
-    assert changed == {'a0', 'a3'}  # only the reply that left the protected tail, then the oldest
+    assert changed == {'a3'}  # only the reply that left the protected tail
     assert regrown['a1'] is grown['a1'] and regrown['a2'] is grown['a2']
     assert 'of 3,507 characters' in output_texts(regrown['a0'])[0]
 
@@ -307,9 +334,9 @@ def test_steady_growth_does_not_reshorten_the_chat_on_every_save(small_limits):
 def test_a_reply_still_being_written_and_the_message_being_saved_keep_their_results(small_limits):
     messages = chain(2, [3_500])
     messages['u0']['childrenIds'] += ['live', 'saving', 'other']
-    messages['live'] = tool_message('live', [3_500], parent='u0', done=False)
-    messages['saving'] = tool_message('saving', [3_500], parent='u0')
-    messages['other'] = tool_message('other', [3_500], parent='u0')
+    messages['live'] = tool_message('live', [3_500], parent='u0', done=False, timestamp=1.5)
+    messages['saving'] = tool_message('saving', [3_500], parent='u0', timestamp=1.5)
+    messages['other'] = tool_message('other', [3_500], parent='u0', timestamp=1.5)
     bounded, changed = bound_messages_map(messages, 'a1', keep={'saving'})
     assert changed == {'other', 'a0'}
     assert bounded['live'] is messages['live'] and bounded['saving'] is messages['saving']
@@ -351,6 +378,7 @@ async def chat_db(monkeypatch, tmp_path):
     async with engine.begin() as connection:
         await connection.run_sync(Chat.__table__.create)
         await connection.run_sync(ChatMessage.__table__.create)
+        await connection.run_sync(File.__table__.create)
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     @asynccontextmanager
@@ -485,12 +513,12 @@ async def test_forked_and_imported_chats_write_rows_from_the_bounded_chat(small_
     body = {'title': 'Fork', 'history': {'messages': messages, 'currentId': 'a5'}}
     forked = await Chats.insert_new_chat('f', 'owner', ChatForm(chat=copy.deepcopy(body)))
     chat, rows = await stored(chat_db, 'f')
-    assert forked is not None and bulk(chat['history']['messages']) <= 7_500
+    assert forked is not None and bulk(chat['history']['messages']) <= 10_000
     for message_id in chat['history']['messages']:
         assert row_texts(rows[message_id]) == output_texts(chat['history']['messages'][message_id])
     [imported] = await Chats.import_chats('owner', [ChatImportForm(chat=copy.deepcopy(body))])
     chat, rows = await stored(chat_db, imported.id)
-    assert bulk(chat['history']['messages']) <= 7_500
+    assert bulk(chat['history']['messages']) <= 10_000
     for message_id in chat['history']['messages']:
         assert row_texts(rows[message_id]) == output_texts(chat['history']['messages'][message_id])
 
@@ -514,3 +542,108 @@ def test_the_one_off_repair_plans_the_same_bounds_for_both_stores(small_limits):
     assert set(row_updates) == {'a0'} and set(row_updates['a0']) == {'output'}
     again = [('c-a0', 'u0', 'assistant', json.dumps(row_updates['a0']['output']), None, None, None, 2, True)]
     assert plan(bounded_chat, rows_to_messages('c', again), 'a0') == (None, {})
+
+
+def test_citation_excerpts_go_before_any_tool_result_the_model_replays(small_limits):
+    messages = chain(4, [800])
+    for index in range(4):
+        reply = messages[f'a{index}']
+        reply['sources'] = [
+            {'source': {'id': f's{index}'}, 'document': ['d' * 1_000, 'e' * 1_000], 'metadata': [{}, {}]}
+        ]
+    bounded, changed = bound_messages_map(messages, 'a3')
+    assert all(output_texts(bounded[key]) == output_texts(messages[key]) for key in messages)  # results whole
+    assert 'Citation excerpt shortened' in bounded['a0']['sources'][0]['document'][0]
+    assert bounded['a3'] is messages['a3']
+
+
+def test_a_tab_left_on_another_branch_cannot_expose_the_newest_turns(small_limits):
+    messages = chain(4, [3_500])
+    messages['u1']['childrenIds'].insert(0, 'b1')
+    messages['b1'] = tool_message('b1', [3_500], parent='u1', childrenIds=['ub2'], timestamp=3.1)
+    messages['ub2'] = {'id': 'ub2', 'parentId': 'b1', 'childrenIds': ['bb2'], 'role': 'user', 'timestamp': 3.2}
+    messages['bb2'] = tool_message('bb2', [3_500], parent='ub2', timestamp=3.3)
+    bounded, changed = bound_messages_map(messages, 'bb2')  # the stale tab's current id
+    assert 'a3' not in changed and bounded['a3'] is messages['a3']
+    assert 'bb2' not in changed  # and the branch it points at keeps its own newest turn
+
+
+def test_the_reply_to_the_prompt_before_it_was_edited_is_protected(small_limits):
+    messages = chain(4, [3_500])
+    messages['a2']['childrenIds'].append('u3e')
+    messages['u3e'] = {'id': 'u3e', 'parentId': 'a2', 'childrenIds': ['a3e'], 'role': 'user', 'timestamp': 9}
+    messages['a3e'] = tool_message('a3e', [3_500], parent='u3e', timestamp=10)
+    bounded, changed = bound_messages_map(messages, 'a3e')
+    assert 'a3' not in changed and bounded['a3'] is messages['a3']
+    assert changed and changed <= {'a0', 'a1', 'a2'}
+
+
+def test_large_protected_turns_leave_older_results_as_previews_not_notes(small_limits):
+    messages = chain(4, [5_000])
+    messages['a3'] = tool_message('a3', [2_900, 2_900], parent='u3', timestamp=8)
+    messages['u3']['childrenIds'] = ['b3', 'a3']
+    messages['b3'] = tool_message('b3', [2_900], parent='u3', timestamp=7.5)  # the previous regeneration
+    bounded, changed = bound_messages_map(messages, 'a3')
+    assert bulk(bounded) <= 10_000
+    for key in ('a0', 'a1', 'a2'):
+        text = output_texts(bounded[key])[0]
+        assert 'Saved copy shortened' in text and not text.startswith('[Saved copy removed')
+
+
+def test_a_message_with_more_results_than_its_budget_allows_previews_for_keeps_its_newest_whole(small_limits):
+    message = tool_message('a', [990] * 10)
+    bounded = bound_message(message)
+    texts = output_texts(bounded)
+    assert sum(len(text) for text in texts) <= 6_000
+    assert texts[-4:] == output_texts(message)[-4:]
+    assert 'Saved copy shortened' in texts[0]
+
+
+def test_a_full_copy_saved_back_by_the_frontend_keeps_the_shortened_copy(small_limits):
+    messages = chain(4, [3_500])
+    bounded, _ = bound_messages_map(messages, 'a3')
+    stored, full = bounded['a0'], messages['a0']
+    kept = chat_bounds.keep_saved_shortening(stored, {**full, 'meta': {'rating': 1}})
+    assert output_texts(kept) == output_texts(stored) and kept['meta'] == {'rating': 1}
+    edited = copy.deepcopy(full)
+    edited['output'][1]['output'][0]['text'] = 'a different result'
+    assert chat_bounds.keep_saved_shortening(stored, edited) is edited  # a real change is taken as it is
+
+
+def test_an_unhashable_id_in_the_messages_list_does_not_break_the_chat(small_limits):
+    chat = {'title': 'T', 'messages': [{'id': ['x'], 'role': 'user', 'content': 'q'}], 'history': {'messages': {}}}
+    assert bound_chat(chat) is chat
+    assert ChatModel(id='c', user_id='o', title='T', chat=chat, created_at=0, updated_at=0).chat == chat
+
+
+@pytest.mark.asyncio
+async def test_saving_a_full_copy_back_does_not_undo_the_bounds(small_limits, chat_db):
+    messages = chain(4, [3_500])
+    bounded, _ = bound_messages_map(messages, 'a3')
+    await seed_chat(chat_db, bounded, 'a3')
+    full = copy.deepcopy(messages)  # what a tab that streamed the turns still holds
+    assert await Chats.update_chat_by_id('c', {'history': {'messages': full, 'currentId': 'a3'}}) is not None
+    chat, rows = await stored(chat_db)
+    for key in ('a0', 'a1', 'a2'):
+        assert output_texts(chat['history']['messages'][key]) == output_texts(bounded[key])
+
+
+@pytest.mark.asyncio
+async def test_attachment_text_is_dropped_only_when_its_file_record_holds_it(small_limits, chat_db):
+    def attachment(file_id):
+        return {'type': 'file', 'id': file_id, 'file': {'data': {'content': 'x' * 900}}}
+
+    messages = {
+        'u0': {'id': 'u0', 'parentId': None, 'childrenIds': [], 'role': 'user', 'content': 'q',
+               'files': [attachment('kept-here'), attachment('elsewhere')]},
+    }  # fmt: skip
+    async with chat_db() as session:
+        session.add(File(id='kept-here', user_id='owner', filename='a.pdf', data={'content': 'x' * 900}, meta={},
+                         created_at=0, updated_at=0))  # fmt: skip
+        await session.commit()
+    await seed_chat(chat_db, messages, 'u0')
+    assert await Chats.update_chat_by_id('c', {'title': 'Renamed'}) is not None
+    chat, _ = await stored(chat_db)
+    kept, elsewhere = chat['history']['messages']['u0']['files']
+    assert 'content' not in kept['file']['data'] and kept['file']['data'][chat_bounds.OMITTED_MARK] is True
+    assert elsewhere['file']['data']['content'] == 'x' * 900  # an imported chat's only copy
