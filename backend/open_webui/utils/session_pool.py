@@ -29,6 +29,7 @@ from typing import Optional
 import aiohttp
 from open_webui.env import (
     AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT,
+    AIOHTTP_CLIENT_STREAM_TOTAL_TIMEOUT,
     AIOHTTP_CLIENT_TIMEOUT,
     AIOHTTP_POOL_CONNECTIONS,
     AIOHTTP_POOL_CONNECTIONS_PER_HOST,
@@ -42,7 +43,7 @@ _session: Optional[aiohttp.ClientSession] = None
 
 _CLIENT_TIMEOUT = aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT)
 _CLIENT_STREAM_TIMEOUT = aiohttp.ClientTimeout(
-    total=AIOHTTP_CLIENT_TIMEOUT,
+    total=AIOHTTP_CLIENT_STREAM_TOTAL_TIMEOUT,
     sock_read=AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT,
 )
 

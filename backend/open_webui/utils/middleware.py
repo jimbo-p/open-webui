@@ -44,6 +44,7 @@ from open_webui.env import (
     ENABLE_TOOL_SERVERS,
     GLOBAL_LOG_LEVEL,
     RAG_SYSTEM_CONTEXT,
+    TOOL_RESULT_MAX_CHARS,
 )
 from open_webui.events import EVENTS, publish_event
 from open_webui.models.access_grants import AccessGrants
@@ -112,6 +113,7 @@ from open_webui.utils.misc import (
     extract_urls,
     get_content_from_message,
     get_last_assistant_message,
+    get_last_tool_result,
     get_last_user_message,
     get_last_user_message_item,
     get_message_list,
@@ -186,6 +188,23 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
+
+
+STREAM_TIMEOUT_MESSAGE = 'The model stopped responding before the answer finished (timeout). Please try again.'
+
+
+def message_error_content(error):
+    """Text stored and shown for a failed turn; never empty, since a bare timeout has no text."""
+    if isinstance(error, HTTPException):
+        error = error.detail
+    elif isinstance(error, dict):
+        error = error.get('detail', error)
+    elif isinstance(error, asyncio.TimeoutError) and not str(error):
+        error = STREAM_TIMEOUT_MESSAGE
+    else:
+        error = str(error) or type(error).__name__
+
+    return error if isinstance(error, (str, dict)) else str(error)
 
 
 def _is_tool_result_error(value: Any) -> bool:
@@ -924,6 +943,17 @@ async def process_tool_result(
             tool_result = json.dumps(tool_result[0], indent=2, ensure_ascii=False) if len(tool_result) > 0 else ''
         else:
             tool_result = str(tool_result)
+
+    if isinstance(tool_result, str) and len(tool_result) > TOOL_RESULT_MAX_CHARS:
+        total_chars = len(tool_result)
+        log.warning(
+            'Tool %s returned %d characters; keeping %d', tool_function_name, total_chars, TOOL_RESULT_MAX_CHARS
+        )
+        tool_result = (
+            f'{tool_result[:TOOL_RESULT_MAX_CHARS]}\n\n[Tool result truncated: only the first '
+            f'{TOOL_RESULT_MAX_CHARS:,} of {total_chars:,} characters are kept. '
+            'Request a smaller range or a narrower query to read the rest.]'
+        )
 
     return tool_result, tool_result_files, tool_result_embeds
 
@@ -2342,6 +2372,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             raise Exception(f'{e}')
 
     initial_output = []
+    # What the model is told is available, by the hidden tool that reports it; added after compaction, and only
+    # when the history the model sees does not already end with the same manifest.
+    manifests: dict[str, str] = {}
     features = form_data.pop('features', None) or {}
     extra_params['__features__'] = features
     if features:
@@ -2603,11 +2636,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
         if skill_tools_enabled and skill_manifest:
             if not metadata.get('assistant_message_id'):
-                initial_output.extend(
-                    hidden_tool_result(
-                        'list_available_skills', f'<available_skills>\n{skill_manifest}</available_skills>'
-                    )
-                )
+                manifests['list_available_skills'] = f'<available_skills>\n{skill_manifest}</available_skills>'
         elif skill_manifest:
             form_data['messages'] = add_or_update_system_message(
                 f'<available_skills>\n{skill_manifest}</available_skills>',
@@ -2844,11 +2873,8 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     knowledge_tags.append(f'<knowledge {attrs}/>')
 
                 if knowledge_tags and not metadata.get('assistant_message_id'):
-                    initial_output.extend(
-                        hidden_tool_result(
-                            'list_attached_knowledge',
-                            '<attached_knowledge>\n' + '\n'.join(knowledge_tags) + '\n</attached_knowledge>',
-                        )
+                    manifests['list_attached_knowledge'] = (
+                        '<attached_knowledge>\n' + '\n'.join(knowledge_tags) + '\n</attached_knowledge>'
                     )
 
             builtin_tools = await get_builtin_tools(
@@ -2990,14 +3016,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             raise Exception(f'{e}')
 
     metadata.pop('initial_output', None)
-    if skill_tools_enabled and not metadata.get('assistant_message_id'):
-        initial_output.extend(
-            await preload_skills(
-                form_data['messages'],
-                activated_skill_ids & resolved_skill_ids,
-                metadata.get('tools', {}).get('view_skill'),
-            )
-        )
+    # Memory recall keeps its place before compaction; manifests and explicit skills are added after it below.
     if initial_output:
         form_data['messages'].extend(
             convert_output_to_messages(initial_output, raw=True, reasoning_format=get_reasoning_format(model))
@@ -3046,6 +3065,26 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         if context_summary:
             summary_content = f'[CONVERSATION SUMMARY]\n{context_summary}'
             form_data['messages'] = add_or_update_system_message(summary_content, form_data['messages'], append=True)
+
+    # Added after compaction: it can summarize away the copy the model had, and it should not summarize this turn's.
+    context_output = []
+    for name, manifest in manifests.items():
+        if get_last_tool_result(form_data['messages'], name) != manifest:
+            context_output.extend(hidden_tool_result(name, manifest))
+    if skill_tools_enabled and not metadata.get('assistant_message_id'):
+        context_output.extend(
+            await preload_skills(
+                form_data['messages'],
+                activated_skill_ids & resolved_skill_ids,
+                metadata.get('tools', {}).get('view_skill'),
+            )
+        )
+    if context_output:
+        form_data['messages'].extend(
+            convert_output_to_messages(context_output, raw=True, reasoning_format=get_reasoning_format(model))
+        )
+        initial_output.extend(context_output)
+        metadata['initial_output'] = initial_output
 
     return form_data, metadata, events, False
 
@@ -4737,14 +4776,7 @@ async def streaming_chat_response_handler(response, ctx):
                     stream_size = 0
 
             def get_message_error_content(error):
-                if isinstance(error, HTTPException):
-                    error = error.detail
-                elif isinstance(error, dict):
-                    error = error.get('detail', error)
-                else:
-                    error = str(error)
-
-                return error if isinstance(error, (str, dict)) else str(error)
+                return message_error_content(error)
 
             async def emit_message_error(error_content):
                 if save_to_chat:

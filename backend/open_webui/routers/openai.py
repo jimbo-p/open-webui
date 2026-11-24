@@ -29,6 +29,7 @@ from open_webui.env import (
     ENABLE_FORWARD_USER_INFO_HEADERS,
     ENABLE_OPENAI_API_PASSTHROUGH,
     MODELS_CACHE_TTL,
+    OPENAI_API_NO_RESPONSE_RETRIES,
     REDIS_KEY_PREFIX,
 )
 from open_webui.events import EVENTS, publish_event, publish_model_provider_request_failed
@@ -80,6 +81,74 @@ BASE_MODELS_CACHE_KEY = f'{REDIS_KEY_PREFIX}:models:base'
 def _clean_proxy_headers(raw_headers) -> dict:
     """Return a copy of *raw_headers* without the encoding, server and date headers."""
     return {k: v for k, v in raw_headers.items() if k.lower() not in _STRIP_PROXY_HEADERS}
+
+
+# A load balancer in front of the provider answers with an HTML page when its target dropped
+# the connection or was restarting; a provider error comes back as JSON and is not retried.
+_GATEWAY_ERROR_STATUSES = frozenset({502, 503, 504})
+
+
+def _is_gateway_error_page(response: aiohttp.ClientResponse) -> bool:
+    return response.status in _GATEWAY_ERROR_STATUSES and 'text/html' in response.headers.get('Content-Type', '')
+
+
+def _no_response_reason(error: BaseException, stream: bool) -> Optional[str]:
+    """Why a chat request may be sent again, or None when it may not.
+
+    Only failures where nothing came back qualify. A connect timeout or a dropped connection
+    is retried for every request. A read timeout before the headers is retried only for
+    streaming requests: there the proxy sends headers with its first chunk, so the wait is
+    bounded by AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT, while a non-streaming request that timed
+    out has already used its whole budget on one answer.
+    """
+    if isinstance(error, aiohttp.ConnectionTimeoutError):
+        return 'connect timeout'
+    if isinstance(error, (aiohttp.ServerTimeoutError, asyncio.TimeoutError)):
+        return 'no response headers in time' if stream else None
+    if isinstance(error, aiohttp.ClientConnectionError):
+        return type(error).__name__
+    return None
+
+
+async def _request_chat_completion(session: aiohttp.ClientSession, *, stream: bool, **request_kwargs):
+    """Send one chat request, again (at most OPENAI_API_NO_RESPONSE_RETRIES times) when no usable
+    response came back.
+
+    Nothing has been streamed to the user at that point, and the proxy (LiteLLM) cancels the
+    upstream model call of a client that went away, so a retry does not duplicate an answer.
+    """
+    attempts = 1 + OPENAI_API_NO_RESPONSE_RETRIES
+    host = urlparse(str(request_kwargs.get('url', ''))).netloc
+    for attempt in range(1, attempts + 1):
+        started = time.monotonic()
+        try:
+            response = await session.request(**request_kwargs)
+        except Exception as error:
+            reason = _no_response_reason(error, stream)
+            if reason is None or attempt == attempts:
+                raise
+            log.warning(
+                'Chat request to %s: %s after %.0fs; sending it again (%d of %d)',
+                host,
+                reason,
+                time.monotonic() - started,
+                attempt,
+                attempts - 1,
+            )
+            continue
+        if attempt < attempts and _is_gateway_error_page(response):
+            log.warning(
+                'Chat request to %s: gateway answered HTTP %d after %.0fs; sending it again (%d of %d)',
+                host,
+                response.status,
+                time.monotonic() - started,
+                attempt,
+                attempts - 1,
+            )
+            await cleanup_response(response)
+            await asyncio.sleep(1)
+            continue
+        return response
 
 
 async def send_get_request(
@@ -1582,7 +1651,9 @@ async def generate_chat_completion(
     try:
         session = await get_session()
 
-        r = await session.request(
+        r = await _request_chat_completion(
+            session,
+            stream=is_streaming_request,
             method='POST',
             url=request_url,
             data=payload,

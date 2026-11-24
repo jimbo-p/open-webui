@@ -614,6 +614,28 @@ else:
 if AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT is not None and AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT <= 0:
     AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT = None
 
+# Total budget for one streaming model call (headers and body). A long answer that keeps
+# arriving should not be cut at the non-streaming limit; a silent one is still bounded by
+# AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT. Defaults to AIOHTTP_CLIENT_TIMEOUT.
+_aiohttp_stream_total_raw = os.getenv('AIOHTTP_CLIENT_STREAM_TOTAL_TIMEOUT', '')
+try:
+    AIOHTTP_CLIENT_STREAM_TOTAL_TIMEOUT = (
+        int(_aiohttp_stream_total_raw) if _aiohttp_stream_total_raw else AIOHTTP_CLIENT_TIMEOUT
+    )
+except (ValueError, TypeError):
+    AIOHTTP_CLIENT_STREAM_TOTAL_TIMEOUT = AIOHTTP_CLIENT_TIMEOUT
+if AIOHTTP_CLIENT_STREAM_TOTAL_TIMEOUT is not None and AIOHTTP_CLIENT_STREAM_TOTAL_TIMEOUT <= 0:
+    AIOHTTP_CLIENT_STREAM_TOTAL_TIMEOUT = None
+
+# Extra attempts for an OpenAI-compatible chat request that got no usable response: a
+# connection error before any headers, a load balancer error page (502/503/504 HTML), or,
+# for streaming requests, no headers within AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT. Nothing has
+# reached the user at that point. 0 keeps the upstream behaviour; at most 2.
+try:
+    OPENAI_API_NO_RESPONSE_RETRIES = min(2, max(0, int(os.getenv('OPENAI_API_NO_RESPONSE_RETRIES', '0') or 0)))
+except (ValueError, TypeError):
+    OPENAI_API_NO_RESPONSE_RETRIES = 0
+
 
 # SSL verification for general outbound requests (OpenAI, OAuth, etc.).
 # Accepts "True", "False", or a path to a CA bundle file.
@@ -1176,6 +1198,9 @@ KNOWLEDGE_GREP_MAX_MATCHES = _int_env('KNOWLEDGE_GREP_MAX_MATCHES', 50)
 # Characters returned by view_file / view_knowledge_file.
 VIEW_FILE_MAX_CHARS = _int_env('VIEW_FILE_MAX_CHARS', 100_000)
 VIEW_FILE_DEFAULT_MAX_CHARS = _int_env('VIEW_FILE_DEFAULT_MAX_CHARS', 10_000)
+# Characters of a single tool result kept for the model and the saved chat. A larger result cannot fit any
+# configured model's context window, so it only made the turn fail and stayed in the chat on every later turn.
+TOOL_RESULT_MAX_CHARS = _int_env('TOOL_RESULT_MAX_CHARS', 4_000_000)
 
 # Tools/functions pip options
 
