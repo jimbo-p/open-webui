@@ -19,13 +19,18 @@ existing file. Reading, planning and the backup take no row lock (one REPEATABLE
 locked only to check that it and
 the rows to change are as they were read, and to write them, then commits as a separate step. A chat that changed
 meanwhile is skipped, and a backup whose changes were not written is removed again; when the commit outcome is
-unknown, the result is checked on a fresh connection and the backup is kept unless the chat is unchanged. updated_at
+unknown, the transaction's status (txid_status) decides, and the backup is kept unless it was aborted. updated_at
 is left alone, so chat lists keep their order. Each chat's snapshot holds no row lock but does hold ACCESS SHARE on
 chat and chat_message, which a schema migration waits for: do not run this while a deploy that runs migrations is
 active or queued.
 --restore MANIFEST stages the backup first, then locks the chat only to check and write: it refuses, unless --force,
 when the chat or those rows changed after the repair (that would drop the newer work), and does nothing when the chat
 is already as backed up.
+
+Backups hold whole chats, so the backup directory is created 0700 and every file 0600, and a shared snapshot is
+named by a short hash of its share token (in the log too; only its manifest holds the token). Keep them only as long
+as the verification period after --apply, then delete them; after --apply an attachment dropped from a chat is read
+from its file record, which therefore must stay.
 
 Memory: one chat at a time. The chat is read message by message and tool result by tool result, and the backup is
 streamed in slices, so the peak is about the parsed size of the chat or of its rows, whichever is larger (about 1.3x
@@ -38,7 +43,7 @@ bigger host. It exits non-zero when any chat failed or changed while being repai
     python -m open_webui.utils.chat_bounds_repair --min-mb 8 --sizes-only
     python -m open_webui.utils.chat_bounds_repair --min-mb 8
     python -m open_webui.utils.chat_bounds_repair --min-mb 8 --apply --backup-dir /data/chat-bounds-backup
-    python -m open_webui.utils.chat_bounds_repair --restore /data/chat-bounds-backup/<chat_id>-<run>.manifest.json
+    python -m open_webui.utils.chat_bounds_repair --restore /data/chat-bounds-backup/<name>-<run>.manifest.json
 """
 
 from __future__ import annotations
@@ -54,10 +59,11 @@ import sys
 import time
 
 # The app's import-time schema migrations must never run from this tool: they would wait on its own row locks.
-os.environ.setdefault('ENABLE_DB_MIGRATIONS', 'False')
+os.environ['ENABLE_DB_MIGRATIONS'] = 'False'
 
 from open_webui.utils.chat_bounds import (  # noqa: E402
     bound_chat_with_changes,
+    bound_message,
     bound_messages_map,
     chat_layout,
     inline_file_ids,
@@ -147,7 +153,9 @@ class ChatPlan:
         posted = history.get('currentId') or chat.get('currentId') or chat.get('branchPointMessageId')
         self.current_id = posted if isinstance(posted, str) else current_id
         self.droppable_files = dict(droppable_files or {})
-        self.layout = chat_layout(messages, self.current_id)
+        # The layout the app's own bounds use: worked out on the per-message-bounded copies.
+        bounded_view = {key: bound_message(message, self.droppable_files) for key, message in messages.items()}
+        self.layout = chat_layout(bounded_view, self.current_id)
         bounded, changed = bound_chat_with_changes(chat, droppable_files=self.droppable_files)
         self.bounded_chat = None if bounded is chat else bounded
         self.fingerprints = {
@@ -402,6 +410,19 @@ def _safe(chat_id: str) -> str:
     return re.sub(r'[^A-Za-z0-9_.-]', '_', chat_id)
 
 
+def label(table: str, chat_id: str) -> str:
+    """How a chat or snapshot is named in the run log and in backup file names. A shared snapshot's id is its share
+    token, so it is shown only as a short hash (the manifest, readable by this account only, keeps the id)."""
+    if table == 'shared_chat':
+        return 'shared-' + hashlib.sha256(chat_id.encode()).hexdigest()[:12]
+    return chat_id
+
+
+def _private_file(path: str, mode: str):
+    """Open a new file readable and writable by this account only; never replace an existing one."""
+    return os.fdopen(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), mode)
+
+
 def _fsync_dir(directory: str) -> None:
     fd = os.open(directory, os.O_RDONLY)
     try:
@@ -428,7 +449,7 @@ class Backup:
         self.published: list[str] = []
         self.sections: list[dict] = []
         self.sha256 = hashlib.sha256()
-        self._raw = open(self.temp_data, 'xb')  # noqa: SIM115 - closed in finish() or discard()
+        self._raw = _private_file(self.temp_data, 'wb')  # closed in finish() or discard()
         self._gzip = gzip.GzipFile(fileobj=self._raw, mode='wb', compresslevel=1)
 
     def add(self, connection, section: dict, select_sql) -> str:
@@ -456,7 +477,7 @@ class Backup:
             'sections': self.sections,
         }
         temp_manifest = os.path.join(self.directory, f'.{self.manifest_name}.tmp')
-        with open(temp_manifest, 'x', encoding='utf-8') as handle:
+        with _private_file(temp_manifest, 'w') as handle:
             json.dump(body, handle, indent=1)
             handle.flush()
             os.fsync(handle.fileno())
@@ -559,9 +580,14 @@ def _droppable(connection, chat: dict, owner_id: str | None) -> dict:
     ids = sorted(inline_file_ids(chat))
     if not ids or not owner_id:
         return {}
-    found = connection.execute(
-        "SELECT id, length(data->>'content') FROM file WHERE id = ANY(%s) AND user_id = %s", (ids, owner_id)
-    ).fetchall()
+    try:
+        with connection.transaction():  # a savepoint: an unreadable record only keeps the text
+            found = connection.execute(
+                "SELECT id, length(data->>'content') FROM file WHERE id = ANY(%s) AND user_id = %s", (ids, owner_id)
+            ).fetchall()
+    except Exception as error:
+        print(f'  could not check attachment records, keeping their text: {type(error).__name__}', flush=True)
+        return {}
     return {file_id: size for file_id, size in found if size}
 
 
@@ -598,6 +624,7 @@ class _Plan:
         self.written_rows: dict[str, dict] = {}
         self.row_digests: dict[str, tuple] = {}
         self.backup: Backup | None = None
+        self.txid: int | None = None
 
     def manifest(self, run_id: str) -> dict:
         return {
@@ -646,7 +673,7 @@ def _back_up(connection, args, run_id: str, plan: _Plan) -> Backup:
     """Stream the originals into a new backup from the same snapshot the plan was made from."""
     from psycopg import sql
 
-    backup = Backup(args.backup_dir, plan.chat_id, run_id)
+    backup = Backup(args.backup_dir, label(plan.table, plan.chat_id), run_id)
     try:
         if plan.bounded_text is not None:
             chat_sql = sql.SQL("SELECT convert_to(chat::text, 'UTF8') FROM {} WHERE id = {}").format(
@@ -694,7 +721,7 @@ def _read_and_plan(connection, args, table: str, chat_id: str, run_id: str) -> t
         removed = _plan_rows_of(connection, plan, chat_plan) if table == 'chat' else 0
         after_chat = len(plan.bounded_text) if plan.bounded_text is not None else plan.chat_bytes
         print(
-            f'{table} {chat_id}: JSON {plan.chat_bytes / 1048576:.1f} -> {after_chat / 1048576:.1f} MB; '
+            f'{label(table, chat_id)}: JSON {plan.chat_bytes / 1048576:.1f} -> {after_chat / 1048576:.1f} MB; '
             f'chat_message saved texts -{removed / 1048576:.1f} M characters in {len(plan.written_rows)} rows',
             flush=True,
         )
@@ -730,6 +757,7 @@ def _write(connection, plan: _Plan) -> None:
             )
             values = [value for value in columns.values() if value is not None]
             connection.execute(f'UPDATE chat_message SET {assignments} WHERE id = %s', (*values, row_id))
+        plan.txid = connection.execute('SELECT txid_current()').fetchone()[0]
     except BaseException:
         connection.rollback()
         raise
@@ -740,20 +768,20 @@ def _write(connection, plan: _Plan) -> None:
 
 
 def _landed(plan: _Plan) -> str:
-    """After an unknown commit outcome, on a fresh connection: 'written', 'original' or 'unknown'."""
+    """After an unknown commit outcome, on a fresh connection: 'written', 'original' or 'unknown'.
+
+    The transaction's own status decides when PostgreSQL still knows it (committed or aborted); while it is in
+    progress, or cannot be read, the outcome stays unknown and the backup is kept.
+    """
     try:
         connection = _connect()
-        chat_md5 = _chat_md5(connection, plan.table, plan.chat_id, lock=False)
-        rows = _row_md5s(connection, list(plan.row_digests), lock=False)
-        connection.close()
+        try:
+            status = connection.execute('SELECT txid_status(%s)', (plan.txid,)).fetchone()[0] if plan.txid else None
+        finally:
+            connection.close()
     except Exception:
         return 'unknown'
-    written_chat, written_rows = plan.written_state()
-    if chat_md5 == written_chat and rows == written_rows:
-        return 'written'
-    if chat_md5 == plan.chat_md5 and rows == plan.row_digests:
-        return 'original'
-    return 'unknown'
+    return {'committed': 'written', 'aborted': 'original'}.get(status, 'unknown')
 
 
 def _repair_one(connection, args, table: str, chat_id: str, run_id: str) -> str:
@@ -772,34 +800,57 @@ def _repair_one(connection, args, table: str, chat_id: str, run_id: str) -> str:
             _write(connection, plan)
         except _CommitUnknown:
             state = _landed(plan)
+            name = label(table, chat_id)
             if state == 'written':
-                print(f'{chat_id}: shrunk (its commit reported an error but landed); backup {manifest_path}')
+                print(f'{name}: shrunk (its commit reported an error but landed); backup {manifest_path}', flush=True)
                 return 'shrunk'
             if state == 'original':
                 plan.backup.remove()
             else:
-                print(f'{chat_id}: the commit outcome is unknown; its backup is kept: {manifest_path}', flush=True)
+                print(f'{name}: the commit outcome is unknown; its backup is kept: {manifest_path}', flush=True)
             raise
         except BaseException:
             plan.backup.remove()  # nothing was written, so the backup would only roll the chat back
             raise
-        print(f'{table} {chat_id}: shrunk; backup {manifest_path}', flush=True)
+        print(f'{label(table, chat_id)}: shrunk; backup {manifest_path}', flush=True)
         return 'shrunk'
     except _Changed:
-        print(f'{chat_id}: skipped, it changed while being repaired (run again)', flush=True)
+        print(f'{label(table, chat_id)}: skipped, it changed while being repaired (run again)', flush=True)
         return 'changed'
 
 
+def _usable(connection):
+    """The same connection, or a new one when the last one broke (for example after a commit error)."""
+    if connection.closed or connection.broken:
+        return _connect()
+    return connection
+
+
 def _attempt(connection, args, table: str, chat_id: str, run_id: str):
+    """Size, check and repair one chat; any error is reported and counted, and the next chat is still tried."""
+    name = label(table, chat_id)
     try:
-        return connection, _repair_one(connection, args, table, chat_id, run_id)
-    except Exception as error:  # reported and counted; the next chat is still tried
+        chat_stored, rows_stored = args.stored[(table, chat_id)]
+        chat_raw, rows_raw = _raw_sizes(connection, table, chat_id)
+        print(
+            f'{name}: JSON {chat_raw / 1048576:.1f} MB and rows {rows_raw / 1048576:.1f} MB '
+            f'({(chat_stored + rows_stored) / 1048576:.1f} MB stored)',
+            flush=True,
+        )
+        if args.max_mb and max(chat_raw, rows_raw) > args.max_mb * 1024 * 1024:
+            print(f'{name}: left for a bigger host, above --max-mb', flush=True)
+            return connection, 'above --max-mb'
+        if args.sizes_only:
+            return connection, 'listed'
+        outcome = _repair_one(connection, args, table, chat_id, run_id)
+        return _usable(connection), outcome
+    except Exception as error:
         try:
             connection.rollback()
         except Exception:
-            connection = _connect()
-        print(f'{chat_id}: FAILED ({type(error).__name__}: {error})', flush=True)
-        return connection, 'failed'
+            pass
+        print(f'{name}: FAILED ({type(error).__name__}: {error})', flush=True)
+        return _usable(connection), 'failed'
 
 
 def repair(args) -> int:
@@ -817,22 +868,12 @@ def repair(args) -> int:
         flush=True,
     )
     outcomes: dict[str, list[str]] = {}
-    for table, chat_id, chat_stored, rows_stored in candidates:
-        chat_raw, rows_raw = _raw_sizes(connection, table, chat_id)
-        print(
-            f'{table} {chat_id}: JSON {chat_raw / 1048576:.1f} MB and rows {rows_raw / 1048576:.1f} MB '
-            f'({(chat_stored + rows_stored) / 1048576:.1f} MB stored)',
-            flush=True,
-        )
-        if args.max_mb and max(chat_raw, rows_raw) > args.max_mb * 1024 * 1024:
-            print(f'{chat_id}: left for a bigger host, above --max-mb', flush=True)
-            outcomes.setdefault('above --max-mb', []).append(chat_id)
-            continue
-        if args.sizes_only:
-            outcomes.setdefault('listed', []).append(chat_id)
-            continue
+    args.stored = {
+        (table, chat_id): (chat_stored, rows_stored) for table, chat_id, chat_stored, rows_stored in candidates
+    }
+    for table, chat_id, _, _ in candidates:
         connection, outcome = _attempt(connection, args, table, chat_id, run_id)
-        outcomes.setdefault(outcome, []).append(chat_id)
+        outcomes.setdefault(outcome, []).append(label(table, chat_id))
     summary = ', '.join(f'{len(ids)} {name}' for name, ids in sorted(outcomes.items())) or 'nothing to do'
     print(f'summary: {summary}', flush=True)
     for name in ('failed', 'changed', 'above --max-mb'):
@@ -942,22 +983,23 @@ def restore(path: str, force: bool) -> int:
         _stage(connection, manifest, path)  # before any lock: the chat is locked only to check and write
         chat_md5 = _chat_md5(connection, table, chat_id, lock=True)
         if chat_md5 is None:
-            print(f'{chat_id}: the chat no longer exists; nothing restored')
+            print(f'{label(table, chat_id)}: the chat no longer exists; nothing restored')
             return 1
         rows = _row_md5s(connection, list(manifest['written']['rows']), lock=True)
         state, drift = _restore_state(manifest, chat_md5, rows)
         if state == 'original':
-            print(f'{chat_id}: already as backed up (the repair was not applied or was restored); nothing to do')
+            print(f'{label(table, chat_id)}: already as backed up (not applied, or restored before); nothing to do')
             return 0
         if state == 'drift' and not force:
             print(
-                f'{chat_id}: refused, changed since the repair ({", ".join(drift[:5])}); restoring would drop that '
+                f'{label(table, chat_id)}: refused, changed since the repair ({", ".join(drift[:5])}); restoring would '
+                'drop that '
                 'newer work. Use --force to overwrite anyway.'
             )
             return 1
         missing = _write_staged(connection, manifest, table)
     rows_count = len(manifest['written']['rows'])
-    print(f'restored {chat_id} and {rows_count} chat_message rows' + (' (forced)' if drift else ''))
+    print(f'restored {label(table, chat_id)} and {rows_count} chat_message rows' + (' (forced)' if drift else ''))
     if missing:
         print(f'not found while restoring: {" ".join(sorted(set(missing)))}')
         return 1
@@ -985,7 +1027,8 @@ def main(argv=None) -> int:
     if args.apply:
         if not args.backup_dir:
             parser.error('--apply needs --backup-dir')
-        os.makedirs(args.backup_dir, exist_ok=True)
+        os.makedirs(args.backup_dir, mode=0o700, exist_ok=True)
+        os.chmod(args.backup_dir, 0o700)
     return repair(args)
 
 

@@ -301,11 +301,15 @@ def test_shared_snapshots_are_listed_repaired_and_restorable(small_limits, datab
     original = seed(database)
     shared_snapshot(database, original)
     assert run('--min-mb', '0', '--sizes-only') == 0
-    assert 'shared_chat share-1' in capsys.readouterr().out
+    assert 'shared-' in capsys.readouterr().out
     assert run('--min-mb', '0', '--apply', '--backup-dir', str(tmp_path)) == 0
     snapshot = database.execute("SELECT chat::text FROM shared_chat WHERE id = 'share-1'").fetchone()[0]
     assert len(snapshot) < len(original) / 2
-    [manifest] = [path for path in tmp_path.glob('share-1-*.manifest.json')]
+    [manifest] = [path for path in tmp_path.glob('shared-*.manifest.json')]
+    out = capsys.readouterr().out
+    assert 'share-1' not in out and not any('share-1' in path.name for path in tmp_path.iterdir())  # no tokens
+    assert oct(tmp_path.stat().st_mode & 0o777) == '0o700'
+    assert all(oct(path.stat().st_mode & 0o777) == '0o600' for path in tmp_path.iterdir())
     assert run('--restore', str(manifest)) == 0
     assert database.execute("SELECT chat::text FROM shared_chat WHERE id = 'share-1'").fetchone()[0] == original
 
@@ -324,10 +328,11 @@ def test_a_rows_only_repair_restores_without_touching_newer_chat_json(small_limi
 
 
 class FlakyCommit:
-    """A connection whose commit after an UPDATE fails, after (landed=True) or instead of committing."""
+    """A connection whose commit after an UPDATE reports an error: after committing, after the server aborted the
+    transaction, or with the transaction still open (in progress)."""
 
-    def __init__(self, inner, landed):
-        self.inner, self.landed, self.updated = inner, landed, False
+    def __init__(self, inner, outcome):
+        self.inner, self.outcome, self.updated = inner, outcome, False
 
     def __getattr__(self, name):
         return getattr(self.inner, name)
@@ -340,25 +345,52 @@ class FlakyCommit:
     def commit(self):
         if self.updated:
             self.updated = False
-            if self.landed:
+            if self.outcome == 'committed':
                 self.inner.commit()
+            elif self.outcome == 'aborted':
+                self.inner.rollback()
             raise RuntimeError('connection lost while committing')
         return self.inner.commit()
 
 
-@pytest.mark.parametrize('landed', [True, False])
+@pytest.mark.parametrize('outcome', ['committed', 'aborted', 'in progress'])
 def test_an_unknown_commit_outcome_is_checked_before_the_backup_is_removed(
-    small_limits, database, tmp_path, monkeypatch, landed
+    small_limits, database, tmp_path, monkeypatch, outcome
 ):
     original = seed(database)
     real_connect = chat_bounds_repair._connect
-    monkeypatch.setattr(chat_bounds_repair, '_connect', lambda: FlakyCommit(real_connect(), landed))
+    monkeypatch.setattr(chat_bounds_repair, '_connect', lambda: FlakyCommit(real_connect(), outcome))
     code = run('--min-mb', '0', '--apply', '--backup-dir', str(tmp_path))
     manifests = list(tmp_path.glob('*.manifest.json'))
-    if landed:
+    if outcome == 'committed':
         assert code == 0 and len(manifests) == 1 and chat_text(database) != original
-    else:
+    elif outcome == 'aborted':
         assert code == 1 and manifests == [] and chat_text(database) == original
+    else:  # still running when checked: the backup stays
+        assert code == 1 and len(manifests) == 1
+
+
+def test_an_unreadable_file_record_does_not_stop_the_repair(small_limits, database, tmp_path):
+    seed(database)  # no file table at all: the attachment check fails, the chat is still repaired
+    chat = json.loads(chat_text(database))
+    chat['history']['messages']['u0']['files'] = [
+        {'type': 'file', 'id': 'f', 'file': {'data': {'content': 'x' * 6_000}}}
+    ]
+    database.execute("UPDATE chat SET chat = %s::json WHERE id = 'big'", (json.dumps(chat),))
+    assert run('--min-mb', '0', '--apply', '--backup-dir', str(tmp_path)) == 0
+    [item] = json.loads(chat_text(database))['history']['messages']['u0']['files']
+    assert item['file']['data']['content'] == 'x' * 6_000
+
+
+def test_the_repair_never_runs_migrations():
+    import subprocess
+    import sys
+
+    code = 'import os, open_webui.utils.chat_bounds_repair; print(os.environ["ENABLE_DB_MIGRATIONS"])'
+    result = subprocess.run(
+        [sys.executable, '-c', code], capture_output=True, text=True, env={**os.environ, 'ENABLE_DB_MIGRATIONS': 'True'}
+    )
+    assert result.stdout.strip().splitlines()[-1] == 'False'
 
 
 def test_a_concurrent_writer_waits_only_briefly(small_limits, database, tmp_path):

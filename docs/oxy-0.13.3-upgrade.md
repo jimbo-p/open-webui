@@ -71,20 +71,30 @@ in full):
    dropped, and the item marked `content_in_file_record`, only when a file
    record of the chat's owner with that id holds text of the same length;
    clones, forks and imports by another user keep their copy.
-3. Recent work is protected whatever branch a save points at: replies still
-   being written and the message being saved, then, newest first and up to
-   three quarters of the budget, everything written since the last
-   `CHAT_BOUND_PROTECTED_TURNS` (2) prompts, and everything under the parent
-   of the newest prompt and of the newest message (the fork a regeneration,
-   an edit or another model's reply hangs from, on all of its branches).
-4. Once tool results and citation excerpts together pass
-   `CHAT_STORED_BULK_MAX_CHARS` (16,000,000 characters), copies are shortened
-   in a fixed order, each group all the way before the next: citation
-   excerpts, then tool results the model no longer replays (other branches,
-   and before a compaction checkpoint while compaction is on), then the
-   replayed tool results. Replayed results never go below
-   `CHAT_TRIM_OLD_PREVIEW_CHARS` (2,000), even if the chat then stays over
-   budget; only unread copies become notes. Per message, tool results keep
+3. Recent work is protected whatever branch a save points at. Always: the
+   message being saved and replies that can still be running (unfinished and
+   newer than the newest prompt). An older unfinished reply, cut off by a
+   restart or the drain at a deploy, or left at an approval pause, stays
+   `done=False` in storage; it is not protected for that, and is ranked like
+   any other message. Then, up to three quarters of the budget and most
+   needed first: every reply at the fork the user is working at (the parent
+   of the newest prompt and of the newest message: the previous attempt,
+   other models' replies, and the answer to a prompt before it was edited),
+   the newest `CHAT_BOUND_PROTECTED_TURNS` (2) turns of the branches the model
+   replays, and the rest of the recent work (everything written since those
+   prompts and everything under those forks), newest first.
+4. One rule for notes: nothing on a branch the model replays ever goes below
+   `CHAT_TRIM_OLD_PREVIEW_CHARS` (2,000), including copies before a
+   compaction checkpoint (an edit or regenerate at or before it replays them
+   again), and copies off those branches become notes only as the last step,
+   while the chat is still over `CHAT_STORED_BULK_MAX_CHARS` (16,000,000).
+   Over the budget, in order: citation excerpts, then off-branch tool
+   results, each to stepped previews and then the short preview, toward three
+   quarters of the budget; then on-branch tool results (those before a
+   checkpoint first) only as far as needed: results not shortened before
+   toward 90% of the budget, already shortened ones again only as far as the
+   budget itself needs; then, if still over, off-branch previews and citation
+   excerpts to notes, oldest first. Per message, tool results keep
    `CHAT_MESSAGE_TOOL_OUTPUT_MAX_CHARS` (8,000,000) together, the largest
    first to a stepped preview of at least `CHAT_TRIM_PREVIEW_MIN_CHARS`
    (20,000), then the oldest to the short preview; a citation excerpt keeps
@@ -92,21 +102,23 @@ in full):
    `CHAT_MESSAGE_SOURCES_MAX_CHARS` (2,000,000).
 5. A shortened text keeps its start and end with a neutral note, counted
    from the original length, so the bounds are stable on their own output.
-   Caps are stepped, and an over-budget chat is brought down to three
-   quarters of the budget where previews allow, so steady growth does not
-   re-shorten on every save. When a client posts back a longer copy (full or
-   an earlier preview) of a text the server had shortened, `update_chat_by_id`
-   keeps the stored copy.
+   Caps are stepped (at most 1.5x apart), so steady growth does not
+   re-shorten the same results on every save. When a client posts back a
+   longer copy (full or an earlier preview) of a text the server had
+   shortened, `update_chat_by_id` keeps the stored copy.
 
 Where it runs: `ChatModel` bounds the chat it carries on every open, export
 and share (without the attachment check, which needs the database); save
 paths that have just bounded what they store pass
-`context={'bounded': True}`. Message saves bound what they store, after
-reading the compaction setting (at most once a minute per worker), and write
+`context={'bounded': True}`. The compaction setting is read at startup and,
+before a message save, at most once a minute per worker. Message saves bound
+what they store and write
 the bounded columns of older messages shortened for the budget to their
 existing `chat_message` rows; a message without a row is left to the
 backfill, which writes it whole from the bounded chat. New, forked and
-imported chats write their rows from the bounded chat. `preload_skills`
+imported chats write their rows from the bounded chat. The attachment check
+runs in a savepoint, so an unreadable file record only keeps the text and
+never makes a chat unsavable. `preload_skills`
 treats a `view_skill` result carrying a note these bounds wrote as not
 loaded. The stored format is unchanged, so rolling back the image needs
 nothing else, and `CHAT_STORAGE_BOUNDS=false` turns all of it off.
@@ -124,8 +136,15 @@ deploy that runs migrations is active or queued), streams the exact original
 bytes of what changes into a new backup (gzip level 1 plus a manifest with
 checksums, never replacing a file), then locks briefly to check nothing
 changed, writes, and commits as a separate step. A backup whose changes were
-not written is removed; when the commit outcome is unknown, a fresh
-connection decides, and the backup is kept unless the chat is unchanged.
+not written is removed; when the commit outcome is unknown, the transaction's
+own status (`txid_status`) decides on a fresh connection, and the backup is
+kept unless the transaction was aborted. The tool never runs the app's
+migrations (`ENABLE_DB_MIGRATIONS` is forced off), creates the backup
+directory 0700 and every backup file 0600, and names a shared snapshot by a
+short hash of its share token in the log and in file names. Keep backups
+only for the verification period after `--apply`, then delete them; an
+attachment dropped by the repair is read from its file record afterwards, so
+that record must stay.
 `--restore MANIFEST` stages the backup before locking, refuses (unless
 `--force`) when what the repair wrote has changed since, leaves the chat JSON
 alone for a rows-only repair, and does nothing when the chat is already as
