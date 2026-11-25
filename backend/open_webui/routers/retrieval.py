@@ -31,7 +31,6 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.documents import Document
 from langchain_text_splitters import (
-    MarkdownHeaderTextSplitter,
     RecursiveCharacterTextSplitter,
     TokenTextSplitter,
 )
@@ -67,6 +66,7 @@ from open_webui.models.knowledge import Knowledges
 
 # Document loaders
 from open_webui.retrieval.loaders.youtube import YoutubeLoader, YoutubeTranscriptError
+from open_webui.retrieval.markdown_splitter import LinearMarkdownHeaderTextSplitter
 from open_webui.retrieval.skip_extraction import skip_extraction_reason, skip_extraction_stub
 from open_webui.retrieval.utils import (
     build_loader_from_config,
@@ -1446,8 +1446,9 @@ def save_docs_to_vector_db(
     if split:
         if config['rag.enable_markdown_header_text_splitter']:
             log.info('Using markdown header text splitter')
-            # Define headers to split on - covering most common markdown header levels
-            markdown_splitter = MarkdownHeaderTextSplitter(
+            # Define headers to split on - covering most common markdown header levels.
+            # Same output as langchain's MarkdownHeaderTextSplitter, without its quadratic steps.
+            markdown_splitter = LinearMarkdownHeaderTextSplitter(
                 headers_to_split_on=[
                     ('#', 'Header 1'),
                     ('##', 'Header 2'),
@@ -1475,11 +1476,13 @@ def save_docs_to_vector_db(
             if config['rag.chunk_min_size_target'] > 0:
                 docs = merge_docs_to_target_size(request, docs, config)
 
+        # add_start_index stays off: nothing reads metadata['start_index'], and langchain's search
+        # for it is quadratic on large one-line texts (minutes of CPU in the serving process).
         if config['rag.text_splitter'] in ['', 'character']:
             text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=config['rag.chunk_size'],
                 chunk_overlap=config['rag.chunk_overlap'],
-                add_start_index=True,
+                add_start_index=False,
             )
             docs = text_splitter.split_documents(docs)
         elif config['rag.text_splitter'] == 'token':
@@ -1490,7 +1493,7 @@ def save_docs_to_vector_db(
                 encoding_name=str(config['rag.tiktoken_encoding_name']),
                 chunk_size=config['rag.chunk_size'],
                 chunk_overlap=config['rag.chunk_overlap'],
-                add_start_index=True,
+                add_start_index=False,
                 disallowed_special=TIKTOKEN_DISALLOWED_SPECIAL,
             )
             docs = text_splitter.split_documents(docs)
@@ -1501,7 +1504,7 @@ def save_docs_to_vector_db(
                 chunk_size=config['rag.chunk_size'],
                 chunk_overlap=config['rag.chunk_overlap'],
                 length_function=get_splitter_length_function(request, config),
-                add_start_index=True,
+                add_start_index=False,
             )
             docs = text_splitter.split_documents(docs)
         else:
