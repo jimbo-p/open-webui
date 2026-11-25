@@ -3,7 +3,8 @@
 - LinearMarkdownHeaderTextSplitter returns exactly what langchain's MarkdownHeaderTextSplitter returns.
 - Chunks split without add_start_index equal the old chunks minus the start_index key.
 - Large inputs split in bounded time and without long GIL holds.
-- The process-status endpoint never loads data.content.
+- Token counting and token splitting give the same results without a Python list of every token.
+- The process-status endpoint never loads data.content; hash and meta updates never load the row.
 
 Set FILE_STATUS_TEST_DATABASE_URL to a disposable PostgreSQL database to also run the status query there.
 """
@@ -24,6 +25,7 @@ from langchain_core.documents import Document
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter, TokenTextSplitter
 from open_webui.retrieval import markdown_splitter
 from open_webui.retrieval.markdown_splitter import LinearMarkdownHeaderTextSplitter, iter_lines, keep_printable
+from open_webui.retrieval.token_splitter import NumpyTokenTextSplitter, count_tokens
 
 HEADERS = [
     ('#', 'Header 1'),
@@ -211,28 +213,33 @@ def split_only(monkeypatch):
 
     record = {'chunks': [], 'kwargs': [], 'split_text': 0.0, 'split_documents': 0.0}
 
-    class RecordingTokenTextSplitter(TokenTextSplitter):
-        def __init__(self, **kwargs):
-            record['kwargs'].append(kwargs)
-            super().__init__(**kwargs)
+    def recording(base):
+        class Recording(base):
+            def __init__(self, **kwargs):
+                record['kwargs'].append(kwargs)
+                super().__init__(**kwargs)
 
-        def split_text(self, text):
-            start = time.monotonic()
-            chunks = super().split_text(text)
-            record['split_text'] += time.monotonic() - start
-            return chunks
+            def split_text(self, text):
+                start = time.monotonic()
+                chunks = super().split_text(text)
+                record['split_text'] += time.monotonic() - start
+                return chunks
 
-        def split_documents(self, documents):
-            start = time.monotonic()
-            chunks = super().split_documents(documents)
-            record['split_documents'] += time.monotonic() - start
-            record['chunks'].append(chunks)
-            return chunks
+            def split_documents(self, documents):
+                start = time.monotonic()
+                chunks = super().split_documents(documents)
+                record['split_documents'] += time.monotonic() - start
+                record['chunks'].append(chunks)
+                return chunks
 
-    monkeypatch.setattr(retrieval, 'TokenTextSplitter', RecordingTokenTextSplitter)
+        return Recording
+
+    RecordingTokenTextSplitter = recording(NumpyTokenTextSplitter)
+
+    monkeypatch.setattr(retrieval, 'NumpyTokenTextSplitter', RecordingTokenTextSplitter)
     # An existing collection with add=False returns before any embedding call.
     monkeypatch.setattr(retrieval, 'get_vector_db_client', lambda: SimpleNamespace(has_collection=lambda **_: True))
-    return SimpleNamespace(retrieval=retrieval, record=record, splitter=RecordingTokenTextSplitter)
+    return SimpleNamespace(retrieval=retrieval, record=record, recording=recording)
 
 
 def test_save_docs_chunks_match_the_upstream_pipeline(monkeypatch, split_only):
@@ -246,13 +253,21 @@ def test_save_docs_chunks_match_the_upstream_pipeline(monkeypatch, split_only):
     new = record['chunks'].pop()
     assert record['kwargs'][-1]['add_start_index'] is False
 
-    # The pre-fix pipeline: langchain's markdown splitter and add_start_index=True.
-    class OldTokenTextSplitter(split_only.splitter):
+    # The pre-fix pipeline: langchain's markdown and token splitters, list-based token counting,
+    # and add_start_index=True.
+    class OldTokenTextSplitter(split_only.recording(TokenTextSplitter)):
         def __init__(self, **kwargs):
             super().__init__(**{**kwargs, 'add_start_index': True})
 
+    def old_length_function(request, config):
+        import tiktoken
+
+        encoding = tiktoken.get_encoding(str(config['rag.tiktoken_encoding_name']))
+        return lambda text: len(encoding.encode(text, disallowed_special=retrieval.TIKTOKEN_DISALLOWED_SPECIAL))
+
     monkeypatch.setattr(retrieval, 'LinearMarkdownHeaderTextSplitter', MarkdownHeaderTextSplitter)
-    monkeypatch.setattr(retrieval, 'TokenTextSplitter', OldTokenTextSplitter)
+    monkeypatch.setattr(retrieval, 'NumpyTokenTextSplitter', OldTokenTextSplitter)
+    monkeypatch.setattr(retrieval, 'get_splitter_length_function', old_length_function)
     assert retrieval.save_docs_to_vector_db(request, docs, 'c', prod_like_config()) is True
     old = record['chunks'].pop()
 
@@ -304,7 +319,8 @@ async def test_status_stream_reads_only_status_fields(status_router):
         status(state='pending'),
         status(state='pending'),
         status(state='processing'),
-        status(state='failed', error='boom'),
+        status(state='failed'),
+        status(state='failed', error='boom'),  # the one read that includes the error
     ]
     owner = SimpleNamespace(id='owner', role='user')
 
@@ -319,6 +335,8 @@ async def test_status_stream_reads_only_status_fields(status_router):
     ]
     status_router.files.get_file_by_id.assert_not_called()
     status_router.access.assert_not_called()
+    calls = status_router.files.get_file_status_by_id.await_args_list
+    assert [call.kwargs.get('include_error', False) for call in calls] == [False] * 5 + [True]
 
 
 @pytest.mark.asyncio
@@ -394,13 +412,15 @@ async def test_status_query_does_not_load_data_content(monkeypatch, tmp_path, ur
             statements.clear()
             decoded.clear()
             found = await Files.get_file_status_by_id('f', db=db)
+            with_error = await Files.get_file_status_by_id('f', include_error=True, db=db)
             missing = await Files.get_file_status_by_id('nope', db=db)
-        assert (found.id, found.user_id, found.status, found.error) == ('f', 'owner', 'failed', 'boom')
+        assert (found.id, found.user_id, found.status, found.error) == ('f', 'owner', 'failed', None)
+        assert (with_error.status, with_error.error) == ('failed', 'boom')
         assert missing is None
         assert decoded == []  # the JSON data column was never transferred and decoded
-        select_sql = next(statement for statement in statements if 'FROM file' in statement)
-        assert select_sql.count('file.data') == 2
-        assert ('file.data ->>' if postgres else 'JSON_EXTRACT(file.data') in select_sql
+        selects = [statement for statement in statements if 'FROM file' in statement]
+        assert [statement.count('file.data') for statement in selects] == [1, 2, 1]
+        assert ('file.data ->>' if postgres else 'JSON_EXTRACT(file.data') in selects[0]
 
         async with AsyncSession(engine) as db:
             full = await Files.get_file_by_id('f', db=db)
@@ -411,3 +431,178 @@ async def test_status_query_does_not_load_data_content(monkeypatch, tmp_path, ur
             async with admin.begin() as conn:
                 await conn.execute(text(f'DROP SCHEMA {schema} CASCADE'))
             await admin.dispose()
+
+
+# --- token counting and token splitting without a Python list of every token ---
+
+TOKEN_TEXTS = FIXED_TEXTS + [
+    'plain words ' * 500,
+    one_line_json(50_000),
+    'emoji 😀😀 and 中文 and combining é' * 300,
+    'special <|endoftext|> and <|fim_prefix|> markers ' * 50,
+]
+
+
+@pytest.mark.parametrize('chunk_size,chunk_overlap', [(1400, 200), (60, 12), (5, 4), (1, 0)])
+def test_numpy_token_splitter_matches_langchain(chunk_size, chunk_overlap):
+    kwargs = dict(encoding_name='cl100k_base', chunk_size=chunk_size, chunk_overlap=chunk_overlap, disallowed_special=())
+    upstream = TokenTextSplitter(**kwargs)
+    numpy_splitter = NumpyTokenTextSplitter(**kwargs)
+    rng = random.Random(f'tok-{chunk_size}')
+    for text in TOKEN_TEXTS + [random_markdown(rng) for _ in range(150)]:
+        assert numpy_splitter.split_text(text) == upstream.split_text(text), repr(text[:200])
+    docs = [Document(page_content=text, metadata={'i': i}) for i, text in enumerate(TOKEN_TEXTS)]
+    assert without_start_index(numpy_splitter.split_documents(docs)) == without_start_index(upstream.split_documents(docs))
+
+
+def test_numpy_token_splitter_keeps_langchain_errors():
+    special = 'a <|endoftext|> b'
+    for kwargs in ({}, {'disallowed_special': 'all'}):
+        with pytest.raises(ValueError):
+            TokenTextSplitter(encoding_name='cl100k_base', **kwargs).split_text(special)
+        with pytest.raises(ValueError):
+            NumpyTokenTextSplitter(encoding_name='cl100k_base', **kwargs).split_text(special)
+    allowed = dict(encoding_name='cl100k_base', allowed_special='all', chunk_size=3, chunk_overlap=1)
+    assert NumpyTokenTextSplitter(**allowed).split_text(special) == TokenTextSplitter(**allowed).split_text(special)
+    with pytest.raises(ValueError):
+        NumpyTokenTextSplitter(encoding_name='cl100k_base', chunk_size=5, chunk_overlap=5).split_text('x y z')
+
+
+def test_count_tokens_matches_encode():
+    import tiktoken
+
+    encoding = tiktoken.get_encoding('cl100k_base')
+    rng = random.Random(3)
+    for text in TOKEN_TEXTS + [random_markdown(rng) for _ in range(100)]:
+        assert count_tokens(encoding, text, disallowed_special=()) == len(encoding.encode(text, disallowed_special=()))
+
+
+def test_token_split_of_a_large_text_releases_the_gil():
+    # 30M chars of one-line JSON: encode() would hold the GIL for about 0.5 s building the token
+    # list and again freeing it; the numpy path keeps every hold short.
+    import tiktoken
+
+    text = one_line_json(30_000_000)
+    encoding = tiktoken.get_encoding('cl100k_base')
+    done = threading.Event()
+    result = {}
+
+    def work():
+        result['count'] = count_tokens(encoding, text, disallowed_special=())
+        result['chunks'] = NumpyTokenTextSplitter(
+            encoding_name='cl100k_base', chunk_size=1400, chunk_overlap=200, disallowed_special=()
+        ).split_text(text)
+        done.set()
+
+    worker = threading.Thread(target=work)
+    worst_gap, last = 0.0, time.monotonic()
+    worker.start()
+    while not done.is_set():
+        time.sleep(0.01)
+        now = time.monotonic()
+        worst_gap, last = max(worst_gap, now - last), now
+    worker.join()
+    assert worst_gap < 0.5
+    assert result['count'] > 1_000_000 and len(result['chunks']) > 900
+
+
+# --- hash and meta updates do not load the row ---
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('url', DATABASES, ids=lambda url: url.split(':', 1)[0])
+async def test_hash_and_meta_updates_do_not_load_data(monkeypatch, tmp_path, url):
+    from open_webui.internal import db as internal_db
+    from open_webui.models.files import File, Files
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+    monkeypatch.setattr(internal_db, 'DATABASE_ENABLE_SESSION_SHARING', True)
+    decoded = []
+
+    def counting_loads(value):
+        decoded.append(len(value))
+        return json.loads(value)
+
+    schema = f'file_upd_{uuid.uuid4().hex[:10]}'
+    postgres = url.startswith('postgresql')
+    if not postgres:
+        url = f'sqlite+aiosqlite:///{tmp_path}/upd.db'
+    connect_args = {'options': f'-csearch_path={schema}'} if postgres else {}
+    if postgres:
+        admin = create_async_engine(url)
+        async with admin.begin() as conn:
+            await conn.execute(text(f'CREATE SCHEMA {schema}'))
+    engine = create_async_engine(url, json_deserializer=counting_loads, connect_args=connect_args)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(File.__table__.create)
+        async with AsyncSession(engine) as db:
+            db.add(
+                File(
+                    id='f',
+                    user_id='owner',
+                    filename='x.txt',
+                    data={'content': 'C' * 2_000_000, 'status': 'completed'},
+                    meta={'name': 'x.txt', 'size': 1},
+                    created_at=0,
+                    updated_at=0,
+                )
+            )
+            await db.commit()
+
+        async with AsyncSession(engine) as db:
+            decoded.clear()
+            assert await Files.update_file_hash_by_id('f', 'abc', db=db) is True
+            assert await Files.update_file_metadata_by_id('f', {'collection_name': 'file-f'}, db=db) is True
+            assert await Files.update_file_hash_by_id('nope', 'abc', db=db) is False
+            assert await Files.update_file_metadata_by_id('nope', {'a': 1}, db=db) is False
+        # Only the small meta column was read back, never the data column.
+        assert decoded and max(decoded) < 1_000
+
+        async with AsyncSession(engine) as db:
+            full = await Files.get_file_by_id('f', db=db)
+        assert full.hash == 'abc' and full.updated_at > 0
+        assert full.meta == {'name': 'x.txt', 'size': 1, 'collection_name': 'file-f'}
+        assert full.data == {'content': 'C' * 2_000_000, 'status': 'completed'}
+    finally:
+        await engine.dispose()
+        if postgres:
+            async with admin.begin() as conn:
+                await conn.execute(text(f'DROP SCHEMA {schema} CASCADE'))
+            await admin.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(len(DATABASES) < 2, reason='needs FILE_STATUS_TEST_DATABASE_URL (PostgreSQL)')
+async def test_status_falls_back_when_postgres_cannot_read_the_json(monkeypatch):
+    # PostgreSQL's ->> rejects a json value holding a \u0000 escape anywhere; the status must stay readable.
+    from open_webui.internal import db as internal_db
+    from open_webui.models.files import File, Files
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+    monkeypatch.setattr(internal_db, 'DATABASE_ENABLE_SESSION_SHARING', True)
+    url = DATABASES[1]
+    schema = f'file_nul_{uuid.uuid4().hex[:10]}'
+    admin = create_async_engine(url)
+    async with admin.begin() as conn:
+        await conn.execute(text(f'CREATE SCHEMA {schema}'))
+    engine = create_async_engine(url, connect_args={'options': f'-csearch_path={schema}'})
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(File.__table__.create)
+        async with AsyncSession(engine) as db:
+            data = {'content': 'a\x00b', 'status': 'failed', 'error': 'boom'}
+            db.add(File(id='f', user_id='owner', filename='x.txt', data=data, meta={}, created_at=0, updated_at=0))
+            await db.commit()
+        async with AsyncSession(engine) as db:
+            found = await Files.get_file_status_by_id('f', db=db)
+            with_error = await Files.get_file_status_by_id('f', include_error=True, db=db)
+        assert (found.user_id, found.status, found.error) == ('owner', 'failed', None)
+        assert (with_error.status, with_error.error) == ('failed', 'boom')
+    finally:
+        await engine.dispose()
+        async with admin.begin() as conn:
+            await conn.execute(text(f'DROP SCHEMA {schema} CASCADE'))
+        await admin.dispose()
