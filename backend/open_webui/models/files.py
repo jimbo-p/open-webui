@@ -97,6 +97,15 @@ class FileMetadataResponse(BaseModel):
     updated_at: int  # timestamp in epoch
 
 
+class FileStatusModel(BaseModel):
+    """Owner and processing status of a file, read without its data column."""
+
+    id: str
+    user_id: str
+    status: str | None = None
+    error: str | None = None
+
+
 class FileListResponse(BaseModel):
     items: list[FileModelResponse]
     total: int
@@ -194,6 +203,27 @@ class FilesTable:
                 )
             except Exception:
                 return None
+
+    async def get_file_status_by_id(self, id: str, db: AsyncSession | None = None) -> FileStatusModel | None:
+        """Read the owner and data.status/data.error in SQL, without loading data.content.
+
+        ``data`` is a JSON column; the subscripts become ``->>`` on PostgreSQL and
+        ``json_extract`` on SQLite, as in get_pending_files_for_knowledge.
+        """
+        try:
+            async with get_async_db_context(db) as db:
+                result = await db.execute(
+                    select(
+                        File.id,
+                        File.user_id,
+                        File.data['status'].as_string().label('status'),
+                        File.data['error'].as_string().label('error'),
+                    ).where(File.id == id)
+                )
+                row = result.first()
+                return FileStatusModel.model_validate(dict(row._mapping)) if row else None
+        except Exception:
+            return None
 
     async def get_files(self, db: AsyncSession | None = None) -> list[FileModel]:
         async with get_async_db_context(db) as db:
