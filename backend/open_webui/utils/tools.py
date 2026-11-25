@@ -39,6 +39,7 @@ from open_webui.env import (
     FORWARD_SESSION_INFO_HEADER_CHAT_ID,
     FORWARD_SESSION_INFO_HEADER_MESSAGE_ID,
     REDIS_KEY_PREFIX,
+    WEBUI_SECRET_KEY,
 )
 from open_webui.models.access_grants import AccessGrants
 from open_webui.models.config import Config
@@ -119,6 +120,12 @@ from open_webui.utils.json_codec import JSONCodec
 from open_webui.utils.mcp.client import MCPClient, OAuthTokenAuth
 from open_webui.utils.misc import is_string_allowed
 from open_webui.utils.oauth import get_system_oauth_token
+from open_webui.utils.sql_chat_tool_context import (
+    SQL_CHAT_TOOL_CONTEXT_HEADER,
+    SQL_CHAT_TOOL_CONTEXT_URL,
+    SQLChatToolContext,
+    sign_sql_chat_tool_context,
+)
 from open_webui.utils.plugin import (
     get_tool_contents_cache,
     get_tools_cache,
@@ -363,7 +370,14 @@ def guard_tool_enabled(tool_id: str, function: Callable) -> Callable:
     return guarded
 
 
-async def get_tools(request: Request, tool_ids: list[str], user: UserModel, extra_params: dict) -> dict[str, dict]:
+async def get_tools(
+    request: Request,
+    tool_ids: list[str],
+    user: UserModel,
+    extra_params: dict,
+    *,
+    trusted_sql_context: SQLChatToolContext | None = None,
+) -> dict[str, dict]:
     """Load tools for the given tool_ids, checking access control."""
     if not tool_ids:
         return {}
@@ -555,6 +569,9 @@ async def get_tools(request: Request, tool_ids: list[str], user: UserModel, extr
                                     name=function_name,
                                     params=kwargs,
                                     server_data=tool_server_data,
+                                    trusted_sql_context=(
+                                        trusted_sql_context if connection.get('auth_type') == 'session' else None
+                                    ),
                                 )
 
                             return tool_function
@@ -1836,6 +1853,8 @@ async def execute_tool_server(
     name: str,
     params: dict[str, Any],
     server_data: dict[str, Any],
+    *,
+    trusted_sql_context: SQLChatToolContext | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any | None]]:
     if not ENABLE_TOOL_SERVERS:
         raise RuntimeError('Tool servers are disabled')
@@ -1934,6 +1953,22 @@ async def execute_tool_server(
             else:
                 body_params = params
 
+        sql_context_header = None
+        if (
+            name == 'tool_executeSQLQuery_post' and http_method == 'post' and final_url == SQL_CHAT_TOOL_CONTEXT_URL
+        ):
+            headers = {
+                key: value for key, value in headers.items() if key.lower() != SQL_CHAT_TOOL_CONTEXT_HEADER.lower()
+            }
+            if (
+                trusted_sql_context is not None
+                and headers.get(FORWARD_SESSION_INFO_HEADER_CHAT_ID) == trusted_sql_context.chat_id
+                and headers.get(FORWARD_SESSION_INFO_HEADER_MESSAGE_ID) == trusted_sql_context.message_id
+            ):
+                sql_context_header = sign_sql_chat_tool_context(trusted_sql_context, body_params, WEBUI_SECRET_KEY)
+            if sql_context_header:
+                headers[SQL_CHAT_TOOL_CONTEXT_HEADER] = sql_context_header
+
         async with get_terminal_client(
             url,
             (headers or {}).get('X-User-Id'),
@@ -1949,7 +1984,7 @@ async def execute_tool_server(
                     headers=headers,
                     cookies=cookies,
                     ssl=AIOHTTP_CLIENT_SESSION_TOOL_SERVER_SSL,
-                    allow_redirects=AIOHTTP_CLIENT_ALLOW_REDIRECTS,
+                    allow_redirects=AIOHTTP_CLIENT_ALLOW_REDIRECTS and sql_context_header is None,
                 ) as response:
                     if response.status >= 400:
                         text = await response.text()

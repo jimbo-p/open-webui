@@ -287,6 +287,7 @@ from open_webui.utils.plugin import install_tool_and_function_dependencies
 from open_webui.utils.recurrence import RecurrenceEvaluationTimeout
 from open_webui.utils.redis import get_redis_client
 from open_webui.utils.session_pool import cleanup_response, get_client_timeout, get_session, stream_wrapper
+from open_webui.utils.sql_chat_tool_context import sql_chat_tool_context
 from open_webui.utils.tool_approval import (
     ResolveToolCallForm,
     build_tool_approval_resume_payload,
@@ -1164,6 +1165,7 @@ async def chat_completion(
         model_item = {}  # Never trust client-supplied model metadata or direct-provider flags.
 
     metadata = {}
+    sql_chat_owner_verified = False
     try:
         model_info = None
         fallback_model = None
@@ -1482,7 +1484,7 @@ async def chat_completion(
                                 assistant_message['modelIdx'] = entry['modelIdx']
                             history_messages[assistant_message_id] = assistant_message
 
-                    await Chats.insert_new_chat(
+                    created_chat = await Chats.insert_new_chat(
                         chat_id,
                         user.id,
                         ChatForm(
@@ -1507,6 +1509,7 @@ async def chat_completion(
                             folder_id=metadata.get('folder_id'),
                         ),
                     )
+                    sql_chat_owner_verified = created_chat is not None
                     await publish_event(
                         request,
                         EVENTS.CHAT_CREATED,
@@ -1586,6 +1589,7 @@ async def chat_completion(
                     chat = await Chats.get_accessible_chat_by_id(chat_id, user, permission='write', chat=existing_chat)
                     if not chat:
                         raise HTTPException(status_code=404, detail=ERROR_MESSAGES.NOT_FOUND)
+                    sql_chat_owner_verified = chat.user_id == user.id
 
                     user_message = metadata.get('user_message') or {}
                     assistant_message_id = metadata.get('assistant_message_id')
@@ -1670,9 +1674,13 @@ async def chat_completion(
         error_detail = None
         try:
             try:
+                trusted_sql_context = None
                 if is_saved_chat_id(metadata.get('chat_id')) and metadata.get('message_id'):
                     async with Chats.edit_message_output(metadata['chat_id'], metadata['message_id']) as message:
                         if message is not None:
+                            trusted_sql_context = sql_chat_tool_context(
+                                user.id, metadata, message, sql_chat_owner_verified, get_user_id_from_session_pool
+                            )
                             response_meta = dict(message.get('meta') or {})
                             # Continuations retain the original start, including approval pauses.
                             # A historical response without a recorded start remains unknown.
@@ -1708,7 +1716,7 @@ async def chat_completion(
                 if metadata.get('assistant_message_id') and not is_saved_chat_id(metadata.get('chat_id')):
                     ctx = await build_chat_response_context(request, form_data, user, model, metadata, tasks, [])
                 form_data, metadata, events, paused = await process_chat_payload(
-                    request, form_data, user, metadata, model
+                    request, form_data, user, metadata, model, trusted_sql_context=trusted_sql_context
                 )
                 if paused:
                     return {'status': True, 'chat_id': metadata.get('chat_id'), 'paused': True}

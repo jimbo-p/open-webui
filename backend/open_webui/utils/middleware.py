@@ -2046,7 +2046,7 @@ def sanitize_tool_pairs(messages: list[dict]) -> list[dict]:
     return sanitized
 
 
-async def process_chat_payload(request, form_data, user, metadata, model):
+async def process_chat_payload(request, form_data, user, metadata, model, *, trusted_sql_context=None):
     # Ensure chat_id is always a string — external API clients may omit it.
     if not isinstance(metadata.get('chat_id'), str):
         metadata['chat_id'] = ''
@@ -2782,6 +2782,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                         '__messages__': form_data['messages'],
                         '__files__': metadata.get('files') or [],
                     },
+                    trusted_sql_context=trusted_sql_context,
                 )
 
             if mcp_tools_dict:
