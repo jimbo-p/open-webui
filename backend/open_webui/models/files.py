@@ -9,7 +9,7 @@ import time
 from open_webui.internal.db import Base, JSONField, get_async_db_context
 from open_webui.utils.misc import sanitize_metadata
 from pydantic import BaseModel, ConfigDict, model_validator
-from sqlalchemy import JSON, BigInteger, Column, String, Text, delete, func, select
+from sqlalchemy import JSON, BigInteger, Column, String, Text, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
@@ -204,26 +204,43 @@ class FilesTable:
             except Exception:
                 return None
 
-    async def get_file_status_by_id(self, id: str, db: AsyncSession | None = None) -> FileStatusModel | None:
-        """Read the owner and data.status/data.error in SQL, without loading data.content.
+    async def get_file_status_by_id(
+        self, id: str, include_error: bool = False, db: AsyncSession | None = None
+    ) -> FileStatusModel | None:
+        """Read the owner and data.status (and data.error if asked) in SQL, without loading data.content.
 
         ``data`` is a JSON column; the subscripts become ``->>`` on PostgreSQL and
-        ``json_extract`` on SQLite, as in get_pending_files_for_knowledge.
+        ``json_extract`` on SQLite, as in get_pending_files_for_knowledge. PostgreSQL
+        parses the whole json value for each subscript, so the error is only read when
+        asked for (once, when a stream ends in 'failed').
         """
+        columns = [File.id, File.user_id, File.data['status'].as_string().label('status')]
+        if include_error:
+            columns.append(File.data['error'].as_string().label('error'))
         try:
-            async with get_async_db_context(db) as db:
-                result = await db.execute(
-                    select(
-                        File.id,
-                        File.user_id,
-                        File.data['status'].as_string().label('status'),
-                        File.data['error'].as_string().label('error'),
-                    ).where(File.id == id)
-                )
+            async with get_async_db_context(db) as session:
+                result = await session.execute(select(*columns).where(File.id == id))
                 row = result.first()
                 return FileStatusModel.model_validate(dict(row._mapping)) if row else None
         except Exception:
-            return None
+            # PostgreSQL cannot apply ->> to some stored json (a \u0000 escape anywhere in it);
+            # fall back to the full row so the status stays readable.
+            log.debug('status-only read failed for file %s; reading the full row', id, exc_info=True)
+            if db is not None:
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+            file = await self.get_file_by_id(id, db=db)
+            if not file:
+                return None
+            data = file.data or {}
+            return FileStatusModel(
+                id=file.id,
+                user_id=file.user_id,
+                status=data.get('status'),
+                error=data.get('error') if include_error else None,
+            )
 
     async def get_files(self, db: AsyncSession | None = None) -> list[FileModel]:
         async with get_async_db_context(db) as db:
@@ -382,20 +399,17 @@ class FilesTable:
                 log.exception(f'Error updating file completely by id: {e}')
                 return None
 
-    async def update_file_hash_by_id(
-        self, id: str, hash: str | None, db: AsyncSession | None = None
-    ) -> FileModel | None:
+    async def update_file_hash_by_id(self, id: str, hash: str | None, db: AsyncSession | None = None) -> bool:
+        """Set the hash without loading the row: its data column can hold 100+ MB of text."""
         async with get_async_db_context(db) as db:
             try:
-                result = await db.execute(select(File).filter_by(id=id))
-                file = result.scalars().first()
-                file.hash = hash
-                file.updated_at = int(time.time())
+                result = await db.execute(
+                    update(File).where(File.id == id).values(hash=hash, updated_at=int(time.time()))
+                )
                 await db.commit()
-
-                return FileModel.model_validate(file)
+                return result.rowcount > 0
             except Exception:
-                return None
+                return False
 
     async def update_file_data_by_id(self, id: str, data: dict, db: AsyncSession | None = None) -> FileModel | None:
         async with get_async_db_context(db) as db:
@@ -409,17 +423,23 @@ class FilesTable:
             except Exception as e:
                 return None
 
-    async def update_file_metadata_by_id(self, id: str, meta: dict, db: AsyncSession | None = None) -> FileModel | None:
+    async def update_file_metadata_by_id(self, id: str, meta: dict, db: AsyncSession | None = None) -> bool:
+        """Merge into meta reading only the meta column: the data column can hold 100+ MB of text."""
         async with get_async_db_context(db) as db:
             try:
-                result = await db.execute(select(File).filter_by(id=id))
-                file = result.scalars().first()
-                file.meta = {**(file.meta if file.meta else {}), **meta}
-                file.updated_at = int(time.time())
+                result = await db.execute(select(File.meta).where(File.id == id))
+                row = result.first()
+                if row is None:
+                    return False
+                await db.execute(
+                    update(File)
+                    .where(File.id == id)
+                    .values(meta={**(row.meta if row.meta else {}), **meta}, updated_at=int(time.time()))
+                )
                 await db.commit()
-                return FileModel.model_validate(file)
+                return True
             except Exception:
-                return None
+                return False
 
     async def update_file_name_by_id(self, id: str, name: str, db: AsyncSession | None = None) -> FileModel | None:
         async with get_async_db_context(db) as db:

@@ -673,7 +673,9 @@ async def get_file_process_status(
                         if status:
                             event = {'status': status}
                             if status == 'failed':
-                                event['error'] = file_item.error
+                                # Read the error once, at the end: each JSON field read parses the whole row.
+                                failed = await Files.get_file_status_by_id(file_id, include_error=True)
+                                event['error'] = failed.error if failed else None
 
                             yield f'data: {JSONCodec.dumps(event)}\n\n'
                             if status in ('completed', 'failed'):
