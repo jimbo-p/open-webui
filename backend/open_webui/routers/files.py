@@ -651,7 +651,8 @@ async def get_file_process_status(
     user=Depends(get_verified_user),
 ):
     # Let DB helpers own short-lived sessions so remote calls and streams do not hold pool connections.
-    file = await Files.get_file_by_id(id)
+    # Read only the owner and status fields: data.content can exceed 100 MB, and the stream polls each second.
+    file = await Files.get_file_status_by_id(id)
 
     if not file:
         raise HTTPException(
@@ -665,15 +666,16 @@ async def get_file_process_status(
 
             async def event_stream(file_id):
                 for _ in range(MAX_FILE_PROCESSING_DURATION):
-                    file_item = await Files.get_file_by_id(file_id)
+                    file_item = await Files.get_file_status_by_id(file_id)
                     if file_item:
-                        data = file_item.model_dump().get('data', {})
-                        status = data.get('status')
+                        status = file_item.status
 
                         if status:
                             event = {'status': status}
                             if status == 'failed':
-                                event['error'] = data.get('error')
+                                # Read the error once, at the end: each JSON field read parses the whole row.
+                                failed = await Files.get_file_status_by_id(file_id, include_error=True)
+                                event['error'] = failed.error if failed else None
 
                             yield f'data: {JSONCodec.dumps(event)}\n\n'
                             if status in ('completed', 'failed'):
@@ -692,7 +694,7 @@ async def get_file_process_status(
                 media_type='text/event-stream',
             )
         else:
-            return {'status': file.data.get('status', 'pending')}
+            return {'status': file.status if file.status is not None else 'pending'}
     else:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
